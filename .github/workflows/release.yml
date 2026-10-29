@@ -1,0 +1,91 @@
+name: Release
+
+# Push a tag like v0.1.0 to build and publish the release assets that install.sh /
+# install.ps1 download: zj-sidebar.wasm, zjsb-helper-<target>[.exe] and SHA256SUMS.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target wasm32-wasip1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: target/wasm32-wasip1/release/zj-sidebar.wasm
+
+  helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: macos-latest, target: aarch64-apple-darwin, ext: "" }
+          - { os: macos-latest, target: x86_64-apple-darwin, ext: "" }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, ext: "", zig: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, ext: "", zig: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: helper
+          key: ${{ matrix.target }}
+      - name: Install zig (cross-compiling Linux binaries)
+        if: matrix.zig
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild --locked
+      - name: Build
+        run: |
+          if [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }} --manifest-path helper/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.target }} --manifest-path helper/Cargo.toml
+          fi
+      - name: Smoke test
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: bash scripts/helper-smoke-test.sh helper/target/${{ matrix.target }}/release/zjsb-helper
+      - name: Collect
+        run: |
+          mkdir -p out
+          cp "helper/target/${{ matrix.target }}/release/zjsb-helper${{ matrix.ext }}" \
+             "out/zjsb-helper-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-${{ matrix.target }}
+          path: out/*
+
+  release:
+    needs: [plugin, helper]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

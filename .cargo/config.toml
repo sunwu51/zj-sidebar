@@ -1,0 +1,6 @@
+# Default to the plugin target so a plain `cargo build --release` builds the wasm plugin.
+# The native helper in helper/ must be built with an explicit host `--target`
+# (see install.sh / install.ps1), because this setting applies to every cargo
+# invocation started in this directory.
+[build]
+target = "wasm32-wasip1"

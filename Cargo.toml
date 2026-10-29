@@ -1,0 +1,19 @@
+[package]
+name = "zj-sidebar"
+version = "0.1.0"
+edition = "2024"
+description = "Zellij plugin: directory-grouped vertical tab list and a git + Claude Code/Codex session panel"
+license = "MIT"
+repository = "https://github.com/sunwu51/zj-sidebar"
+publish = false
+
+[dependencies]
+serde_json = "1.0.154"
+unicode-width = "0.2.2"
+zellij-tile = "0.45.1"
+zellij-utils = "0.45.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
