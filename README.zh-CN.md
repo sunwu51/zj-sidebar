@@ -60,7 +60,7 @@ default_layout "sidebar"
 点击左侧栏底部的 `≡ git · sessions`，或绑定快捷键（安装脚本会打印带你真实路径的这一行），写在 `keybinds { shared_except "locked" { … } }` 里：
 
 ```kdl
-bind "Alt b" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
+bind "Alt d" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
 ```
 
 macOS 上 `Alt` 需要终端开启 “Option 当 Alt/Meta”（kitty：`macos_option_as_alt yes`；iTerm2：Profiles → Keys → Left Option = Esc+；Terminal.app：Use Option as Meta key；Alacritty：`option_as_alt = "Both"`）。
@@ -121,7 +121,7 @@ Linux/macOS 上的 bash/zsh/fish 不需要。
 
 - **侧边栏提示权限 / 没反应**：点它，按 `y`。
 - **没有 Codex 会话、没有 `●`**：helper 不在插件查找的位置或没有执行权限；手动运行 `zjsb-helper codex "$PWD"` 排查，或用别名设置 `helper`。
-- **macOS 上 Alt+b 没反应**：开启 Option 当 Alt，或直接点按钮。
+- **macOS 上 Alt+d 没反应**：开启 Option 当 Alt，或直接点按钮。
 - **Windows 上目录分组不对**：加上面的 profile 钩子。
 - **zellij 升级后插件加载失败**：插件是针对 zellij 次版本（这里是 0.45）编译的，请重装匹配的版本。
 

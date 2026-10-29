@@ -61,7 +61,7 @@ default_layout "sidebar"
 Click `≡ git · sessions` at the bottom of the left sidebar, or bind a key (the installer prints this line with your real path) inside `keybinds { shared_except "locked" { … } }`:
 
 ```kdl
-bind "Alt b" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
+bind "Alt d" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
 ```
 
 On macOS, `Alt` needs "Option as Alt/Meta" in your terminal (kitty: `macos_option_as_alt yes`, iTerm2: Profiles → Keys → Left Option = Esc+, Terminal.app: Use Option as Meta key, Alacritty: `option_as_alt = "Both"`).
@@ -124,7 +124,7 @@ More optional tweaks (theme, default shell, `Ctrl+X Ctrl+E` command editing, key
 
 - **Sidebar shows a permission prompt / nothing happens** – click it, press `y`.
 - **No Codex sessions, no `●`** – the helper isn't where the plugin looks (see the table above) or isn't executable; run `zjsb-helper codex "$PWD"` by hand, or set `helper` in an alias.
-- **Alt+b does nothing on macOS** – enable Option-as-Alt (see above), or click the button.
+- **Alt+d does nothing on macOS** – enable Option-as-Alt (see above), or click the button.
 - **Wrong directory grouping on Windows** – add the profile hook above.
 - **Plugin refuses to load after a zellij upgrade** – plugins are built for a zellij minor version (here 0.45); rebuild or install a matching release.
 

@@ -132,9 +132,9 @@ Try it now:
 Make it the default: add this line to $CONFIG_DIR/config.kdl
     default_layout "sidebar"
 
-Optional keybinding (Alt+b toggles the git/sessions panel), inside
+Optional keybinding (Alt+d toggles the git/sessions panel), inside
 keybinds { shared_except "locked" { ... } } in config.kdl:
-    bind "Alt b" { MessagePlugin "$PLUGIN_URL" { name "toggle_panel"; }; }
+    bind "Alt d" { MessagePlugin "$PLUGIN_URL" { name "toggle_panel"; }; }
 (or just click "git · sessions" at the bottom of the left sidebar)
 
 On first start, zellij asks the sidebar for permissions: click it and press y.
