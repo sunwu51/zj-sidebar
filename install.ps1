@@ -174,6 +174,8 @@ keybinds { shared_except "locked" { ... } } in config.kdl:
     bind "Alt d" { MessagePlugin "$pluginUrl" { name "toggle_panel"; }; }
 (or just click "git / sessions" at the bottom of the left sidebar)
 
+A ready-to-copy config with all of this: https://github.com/sunwu51/zj-sidebar/blob/main/examples/config.kdl
+
 On first start, zellij asks the sidebar for permissions: click it and press y.
 "@
 if (-not $PatchProfile) {

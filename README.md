@@ -56,6 +56,10 @@ default_layout "sidebar"
 
 **First start:** the sidebar asks zellij for permissions. Click the sidebar and press `y`. (A brand-new zellij also shows its own first-run wizard; press `Esc`.)
 
+### Example config
+
+[`examples/config.kdl`](examples/config.kdl) has everything below in one file (default layout, the panel key `Alt+d`, a floating-shell key `Alt+j`). It only adds to zellij's defaults, so you can use it as your whole `config.kdl` or merge it into yours.
+
 ### Optional: a key for the panel
 
 Click `≡ git · sessions` at the bottom of the left sidebar, or bind a key (the installer prints this line with your real path) inside `keybinds { shared_except "locked" { … } }`:

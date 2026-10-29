@@ -1,0 +1,32 @@
+// Example ~/.config/zellij/config.kdl for zj-sidebar.
+//
+// This file only ADDS to zellij's defaults, so it can be used as your whole config.kdl
+// (zellij merges it with its built-in keybindings) or merged by hand into an existing one.
+// Windows: the config dir is %APPDATA%\Zellij\config, and the plugin URL below becomes
+//   file:C:/Users/<you>/AppData/Roaming/Zellij/config/plugins/zj-sidebar.wasm
+// (install.sh / install.ps1 print the exact URL for your machine).
+
+// Start every new session with the sidebar layout (layouts/sidebar.kdl).
+default_layout "sidebar"
+
+keybinds {
+    shared_except "locked" {
+        // Toggle the git + Claude/Codex sessions panel. Same as clicking
+        // "git · sessions" at the bottom of the left sidebar.
+        // On macOS, Alt needs "Option as Alt" in your terminal (see the README).
+        bind "Alt d" {
+            MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" {
+                name "toggle_panel"
+            }
+        }
+
+        // Show/hide a floating scratch shell (zellij built-in; the default is Alt+f).
+        bind "Alt j" { ToggleFloatingPanes; }
+    }
+}
+
+// Optional: zellij does not inherit your terminal's theme.
+// theme "catppuccin-mocha"
+
+// Optional: shell for new panes (Windows: full path to pwsh.exe, forward slashes).
+// default_shell "zsh"

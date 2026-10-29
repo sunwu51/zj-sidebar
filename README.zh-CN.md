@@ -55,6 +55,10 @@ default_layout "sidebar"
 
 **首次启动**：侧边栏会向 zellij 申请权限，点一下侧边栏，按 `y`。（全新的 zellij 还会弹自己的首次向导，按 `Esc`。）
 
+### 示例配置
+
+[`examples/config.kdl`](examples/config.kdl) 把下面这些写在了一个文件里（默认布局、面板键 `Alt+d`、悬浮 shell 键 `Alt+j`）。它只是在 zellij 默认配置上追加，可以直接当作你的 `config.kdl`，或合并进已有的配置。
+
 ### 可选：面板快捷键
 
 点击左侧栏底部的 `≡ git · sessions`，或绑定快捷键（安装脚本会打印带你真实路径的这一行），写在 `keybinds { shared_except "locked" { … } }` 里：
