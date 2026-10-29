@@ -39,6 +39,32 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// The part of `s` that is `width` columns wide, starting `skip` columns in. A wide
+/// character cut by either edge becomes a space.
+pub fn slice_cols(s: &str, skip: usize, width: usize) -> String {
+    let mut out = String::new();
+    let (mut col, mut used) = (0usize, 0usize);
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        let start = col;
+        col += cw;
+        if col <= skip {
+            continue;
+        }
+        if used + cw > width {
+            break;
+        }
+        if start < skip {
+            out.push_str(&" ".repeat(col - skip));
+            used += col - skip;
+        } else {
+            out.push(c);
+            used += cw;
+        }
+    }
+    out
+}
+
 /// Cut `s` from the left, keeping the tail (useful for file paths).
 pub fn truncate_left(s: &str, max: usize) -> String {
     if width(s) <= max {

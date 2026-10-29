@@ -1,6 +1,8 @@
 //! zj-sidebar: a vertical, directory-grouped tab list (`mode "tabs"`) and a
 //! toggleable git + agent-session panel (`mode "panel"`) for zellij.
 
+mod diff;
+mod diffparse;
 mod git;
 mod panel;
 mod sessions;
@@ -26,6 +28,7 @@ enum Mode {
     #[default]
     Tabs,
     Panel,
+    Diff,
 }
 
 /// Session-wide facts both modes need.
@@ -102,6 +105,7 @@ struct State {
     shared: Shared,
     tabs: tabs::TabsView,
     panel: panel::Panel,
+    diff: diff::DiffView,
 }
 
 register_plugin!(State);
@@ -110,11 +114,12 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.mode = match configuration.get("mode").map(String::as_str) {
             Some("panel") => Mode::Panel,
+            Some("diff") => Mode::Diff,
             _ => Mode::Tabs,
         };
         self.shared.config = configuration;
         self.shared.my_id = get_plugin_ids().plugin_id;
-        // Same list in both modes so a single grant covers the plugin file.
+        // Same list in every mode so a single grant covers the plugin file.
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -144,6 +149,16 @@ impl ZellijPlugin for State {
             ]);
             self.panel.load(&self.shared);
         }
+        if self.mode == Mode::Diff {
+            // the overlay only needs input and its own git output
+            events = vec![
+                EventType::PermissionRequestResult,
+                EventType::Key,
+                EventType::Mouse,
+                EventType::RunCommandResult,
+            ];
+            self.diff.load(&self.shared);
+        }
         subscribe(&events);
     }
 
@@ -162,6 +177,7 @@ impl ZellijPlugin for State {
         match self.mode {
             Mode::Tabs => self.tabs.update(&mut self.shared, &event),
             Mode::Panel => self.panel.update(&mut self.shared, &event),
+            Mode::Diff => self.diff.update(&mut self.shared, &event),
         }
     }
 
@@ -187,6 +203,7 @@ impl ZellijPlugin for State {
         match self.mode {
             Mode::Tabs => self.tabs.render(&mut self.shared, rows, cols),
             Mode::Panel => self.panel.render(&mut self.shared, rows, cols),
+            Mode::Diff => self.diff.render(&mut self.shared, rows, cols),
         }
     }
 }

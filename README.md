@@ -6,7 +6,7 @@ A [zellij](https://zellij.dev) plugin for people who run Claude Code / Codex in 
 
 - **Vertical tab list** on the left, **grouped by working directory**. Click a group to fold/unfold it, click a tab to switch.
 - **Git + sessions panel** on the right (toggle with a click or a key):
-  - top: directory, branch (ahead/behind), changed files with `+added -deleted`;
+  - top: directory, branch (ahead/behind), changed files with `+added -deleted`; `Enter` on a file opens its **side-by-side diff** in a floating overlay;
   - bottom: the **Claude Code and Codex sessions of that directory**, newest first. `↑/↓` + `Enter` (or click) resumes one:
     - already open in some pane (marked `●`) → jumps to it;
     - current shell idle → types `claude --resume <id>` / `codex resume <id>` there;
@@ -75,7 +75,8 @@ On macOS, `Alt` needs "Option as Alt/Meta" in your terminal (kitty: `macos_optio
 | | |
 |---|---|
 | Left sidebar | click a group header to fold; click a row to switch; `+ new tab` opens one in the current directory; mouse wheel scrolls |
-| Panel | `j`/`k`/`↑`/`↓` move, `Enter` or click the selected row opens, `r` refresh, `q`/`Esc` close |
+| Panel | two lists, each with its own cursor, scrolling and counter (`3/18` next to the file summary, `5/50` next to SESSIONS): `j`/`k`/`↑`/`↓` move inside the focused list and stop at its ends, `Tab` switches list, `Enter` or click the selected row opens it (file → diff overlay, session → resume), `g`/`G` first/last, `r` refresh, `q`/`Esc` close |
+| Diff overlay | `j`/`k` scroll, `space`/`b` page, `n`/`p` next/previous hunk, `]`/`[` (or `Tab`/`Shift+Tab`) next/previous changed file, `h`/`l` scroll sideways, `g`/`G` top/end, `q`/`Esc` close |
 | `●` next to `CC`/`CX` | that session is currently running in some pane of this zellij session |
 
 Tabs without a custom name are labelled with their shell/program; groups are keyed by the directory of the tab's focused pane.
@@ -123,6 +124,7 @@ More optional tweaks (theme, default shell, `Ctrl+X Ctrl+E` command editing, key
 - Codex keeps its thread list in `~/.codex/state_<n>.sqlite`, which a wasm plugin can't read, so a small native helper (`helper/`) lists the threads `codex resume` would show for the directory (not archived, `cli`/`vscode` sources).
 - "Running" detection: the helper walks each pane shell's child processes. Claude: `~/.claude/sessions/<pid>.json`; Codex: a `codex resume <id>` command line (a Codex started as plain `codex` isn't detected).
 - "Idle" = the pane's foreground process is a shell.
+- The diff overlay is a third mode (`diff`) of the same plugin, opened as a floating pane; it runs `git diff HEAD -- <file>` (untracked files: `--no-index` against `/dev/null`) and aligns removed/added lines into two columns.
 
 ## Troubleshooting
 
@@ -138,6 +140,7 @@ More optional tweaks (theme, default shell, `Ctrl+X Ctrl+E` command editing, key
 cargo build --release                      # plugin -> target/wasm32-wasip1/release/zj-sidebar.wasm
 cargo build --release --manifest-path helper/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 bash scripts/helper-smoke-test.sh helper/target/<host>/release/zjsb-helper   # Linux/macOS
+rustc --test --edition 2024 src/diffparse.rs -o /tmp/dp && /tmp/dp               # diff parser unit tests
 ```
 
 Releases: push a tag `vX.Y.Z`; the workflow builds the wasm plugin and the helper for Windows x64, Linux x64/arm64 (musl, static) and macOS x64/arm64, and publishes them with `SHA256SUMS`.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use zellij_tile::prelude::*;
 
-use crate::git::{GitRaw, GitState};
+use crate::git::{GitFile, GitRaw, GitState};
 use crate::sessions::{self, now_secs, Kind, Session, SessionScanner, MAX_SESSIONS};
 use crate::ui::{self, Line, BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, YELLOW};
 use crate::Shared;
@@ -32,11 +32,27 @@ pub struct Panel {
     pane_pids: HashMap<u32, u32>,
     /// session id -> terminal pane currently running it
     running: HashMap<String, u32>,
-    selected: usize,
-    /// the user picked a row; keep it selected across refreshes
-    moved: bool,
-    scroll: usize,
-    clicks: Vec<Option<usize>>,
+    /// changed files of the repo, in `git status` order
+    files: Vec<GitFile>,
+    /// repo root (`git rev-parse --show-toplevel`); `git status` paths are relative to it
+    root: Option<String>,
+    /// index over files followed by sessions
+    /// which list the cursor is in
+    focus: Focus,
+    /// the user chose a list (otherwise: files if there are any, else sessions)
+    user_focus: bool,
+    /// cursor and scroll offset of the file list and of the session list, independently
+    fsel: usize,
+    ssel: usize,
+    fscroll: usize,
+    sscroll: usize,
+    /// identity of the selected row ("path" / session id), to find it again after a refresh
+    fkey: Option<String>,
+    skey: Option<String>,
+    /// the user moved that cursor; until then it stays on the first row
+    fmoved: bool,
+    smoved: bool,
+    clicks: Vec<Option<(Focus, usize)>>,
     tick: u64,
     status: Option<String>,
     /// (tab id, command, give-up tick) for a session opened in a new tab
@@ -66,6 +82,23 @@ fn default_helper(env: &BTreeMap<String, String>) -> String {
         _ => return "zjsb-helper".into(),
     };
     format!("{dir}/zjsb-helper")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Focus {
+    #[default]
+    Files,
+    Sessions,
+}
+
+/// Where the cursor of a list goes after the list changed.
+fn restored(keys: &[String], moved: bool, key: &Option<String>, sel: usize) -> usize {
+    if !moved {
+        return 0;
+    }
+    key.as_ref()
+        .and_then(|k| keys.iter().position(|x| x == k))
+        .unwrap_or_else(|| sel.min(keys.len().saturating_sub(1)))
 }
 
 fn git_ctx(kind: &str, cwd: &str) -> BTreeMap<String, String> {
@@ -100,8 +133,9 @@ impl Panel {
         let Some(cwd) = self.cwd.clone() else { return };
         let dir = PathBuf::from(&cwd);
         let env = BTreeMap::new();
-        let runs: [(&str, &[&str]); 3] = [
-            ("status", &["git", "--no-optional-locks", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-b"]),
+        let runs: [(&str, &[&str]); 4] = [
+            ("status", &["git", "--no-optional-locks", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-b", "-uall"]),
+            ("root", &["git", "rev-parse", "--show-toplevel"]),
             ("unstaged", &["git", "--no-optional-locks", "-c", "core.quotepath=false", "diff", "--numstat"]),
             ("staged", &["git", "--no-optional-locks", "-c", "core.quotepath=false", "diff", "--cached", "--numstat"]),
         ];
@@ -121,14 +155,65 @@ impl Panel {
     }
 
     fn merge_sessions(&mut self) {
-        let keep = self.moved.then(|| self.sessions.get(self.selected).map(|s| s.id.clone())).flatten();
         let mut all: Vec<Session> = self.claude.iter().chain(&self.codex).cloned().collect();
         all.sort_by(|a, b| b.updated.cmp(&a.updated));
         all.truncate(MAX_SESSIONS);
         self.sessions = all;
-        self.selected = keep
-            .and_then(|id| self.sessions.iter().position(|s| s.id == id))
-            .unwrap_or(0);
+        self.restore_sel();
+    }
+
+    fn len(&self, f: Focus) -> usize {
+        match f {
+            Focus::Files => self.files.len(),
+            Focus::Sessions => self.sessions.len(),
+        }
+    }
+
+    fn sel(&self, f: Focus) -> usize {
+        match f {
+            Focus::Files => self.fsel,
+            Focus::Sessions => self.ssel,
+        }
+    }
+
+    fn key_of(&self, f: Focus, i: usize) -> Option<String> {
+        match f {
+            Focus::Files => self.files.get(i).map(|x| x.path.clone()),
+            Focus::Sessions => self.sessions.get(i).map(|x| x.id.clone()),
+        }
+    }
+
+    /// The user put the cursor on row `i` of list `f`.
+    fn select(&mut self, f: Focus, i: usize) {
+        let i = i.min(self.len(f).saturating_sub(1));
+        self.focus = f;
+        self.user_focus = true;
+        let key = self.key_of(f, i);
+        match f {
+            Focus::Files => (self.fsel, self.fmoved, self.fkey) = (i, true, key),
+            Focus::Sessions => (self.ssel, self.smoved, self.skey) = (i, true, key),
+        }
+    }
+
+    /// The lists changed under us: keep each cursor on the same file/session if the user moved it.
+    fn restore_sel(&mut self) {
+        let fkeys: Vec<String> = self.files.iter().map(|f| f.path.clone()).collect();
+        let skeys: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        self.fsel = restored(&fkeys, self.fmoved, &self.fkey, self.fsel);
+        self.ssel = restored(&skeys, self.smoved, &self.skey, self.ssel);
+        self.fkey = self.key_of(Focus::Files, self.fsel);
+        self.skey = self.key_of(Focus::Sessions, self.ssel);
+        if !self.user_focus || self.len(self.focus) == 0 {
+            self.focus = if !self.files.is_empty() || self.sessions.is_empty() { Focus::Files } else { Focus::Sessions };
+        }
+    }
+
+    fn sync_files(&mut self) {
+        self.files = match self.git.state() {
+            GitState::Repo(info) => info.files,
+            _ => Vec::new(),
+        };
+        self.restore_sel();
     }
 
     /// Follow the focused terminal pane of this tab (ignoring the panel itself).
@@ -152,12 +237,15 @@ impl Panel {
         }
         self.cwd = Some(cwd);
         self.git = GitRaw::default();
+        self.files.clear();
+        self.root = None;
         self.sessions.clear();
         self.claude.clear();
         self.codex.clear();
-        self.selected = 0;
-        self.moved = false;
-        self.scroll = 0;
+        (self.fsel, self.ssel, self.fscroll, self.sscroll) = (0, 0, 0, 0);
+        (self.fmoved, self.smoved, self.user_focus) = (false, false, false);
+        (self.fkey, self.skey) = (None, None);
+        self.focus = Focus::Files;
         self.refresh_git();
         self.refresh_sessions();
         true
@@ -245,12 +333,61 @@ impl Panel {
             .collect();
     }
 
-    /// Enter on a session: jump to it if some pane already runs it, else launch it.
     fn open_selected(&mut self, shared: &Shared) {
-        let Some(s) = self.sessions.get(self.selected) else { return };
+        match self.focus {
+            Focus::Files => self.open_diff(shared, self.fsel),
+            Focus::Sessions => self.open_session(shared, self.ssel),
+        }
+    }
+
+    /// Enter on a session: jump to it if some pane already runs it, else launch it.
+    fn open_session(&mut self, shared: &Shared, i: usize) {
+        let Some(s) = self.sessions.get(i) else { return };
         let id = s.id.clone();
         self.status = Some("…".into());
         self.refresh_running(shared, Some(&id));
+    }
+
+    /// Enter on a file: a floating plugin pane (mode "diff") with a side-by-side diff.
+    fn open_diff(&mut self, shared: &Shared, i: usize) {
+        let Some(f) = self.files.get(i).cloned() else { return };
+        let Some(cwd) = self.root.clone().or_else(|| self.cwd.clone()) else { return };
+        let Some(url) = shared.my_pane().and_then(|p| p.plugin_url.clone()) else {
+            self.status = Some("cannot find the plugin location".into());
+            return;
+        };
+        let config = BTreeMap::from([
+            ("mode".to_string(), "diff".to_string()),
+            ("diff_cwd".to_string(), cwd),
+            ("diff_path".to_string(), f.path.clone()),
+            ("diff_code".to_string(), f.code.clone()),
+            // the whole list, so the overlay can move on to the next/previous file
+            ("diff_index".to_string(), i.to_string()),
+            (
+                "diff_files".to_string(),
+                self.files.iter().map(|x| format!("{}\t{}", x.code, x.path)).collect::<Vec<_>>().join("\n"),
+            ),
+            // unique per request, so every Enter opens a fresh overlay
+            ("n".to_string(), self.tick.to_string()),
+        ]);
+        let mut msg = MessageToPlugin::new("open")
+            .with_plugin_url(url)
+            .with_plugin_config(config)
+            .new_plugin_instance_should_float(true)
+            .new_plugin_instance_should_have_pane_title(f.path)
+            .new_plugin_instance_should_be_focused();
+        let coords = FloatingPaneCoordinates::new(
+            Some("3%".into()),
+            Some("3%".into()),
+            Some("94%".into()),
+            Some("92%".into()),
+            None,
+            None,
+        );
+        if let Some(c) = coords {
+            msg = msg.with_floating_pane_coordinates(c);
+        }
+        pipe_message_to_plugin(msg);
     }
 
     fn launch(&mut self, shared: &Shared, s: Session) {
@@ -274,13 +411,14 @@ impl Panel {
         }
     }
 
+    /// Move within the focused list only; stops at the first/last row.
     fn move_sel(&mut self, delta: isize) {
-        if self.sessions.is_empty() {
+        let n = self.len(self.focus);
+        if n == 0 {
             return;
         }
-        let max = self.sessions.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-        self.moved = true;
+        let to = (self.sel(self.focus) as isize + delta).clamp(0, n as isize - 1) as usize;
+        self.select(self.focus, to);
     }
 
     pub fn update(&mut self, shared: &mut Shared, event: &Event) -> bool {
@@ -365,8 +503,13 @@ impl Panel {
                     }
                     Some("unstaged") => self.git.unstaged = ok.then_some(out),
                     Some("staged") => self.git.staged = ok.then_some(out),
+                    Some("root") => {
+                        self.root = ok.then(|| out.trim().to_string()).filter(|r| !r.is_empty());
+                        return false;
+                    }
                     _ => return false,
                 }
+                self.sync_files();
                 true
             }
             Event::Key(key) if key.has_no_modifiers() => {
@@ -375,7 +518,14 @@ impl Panel {
                     BareKey::Up | BareKey::Char('k') => self.move_sel(-1),
                     BareKey::PageDown => self.move_sel(10),
                     BareKey::PageUp => self.move_sel(-10),
-                    BareKey::Home | BareKey::Char('g') => self.selected = 0,
+                    BareKey::Home | BareKey::Char('g') => self.select(self.focus, 0),
+                    BareKey::Tab => {
+                        // switch between the file list and the session list
+                        let other = if self.focus == Focus::Files { Focus::Sessions } else { Focus::Files };
+                        if self.len(other) > 0 {
+                            self.select(other, self.sel(other));
+                        }
+                    }
                     BareKey::End | BareKey::Char('G') => self.move_sel(isize::MAX / 2),
                     BareKey::Enter => self.open_selected(shared),
                     BareKey::Char('r') => {
@@ -392,14 +542,13 @@ impl Panel {
                 true
             }
             Event::Mouse(Mouse::LeftClick(line, _)) => {
-                let Some(Some(i)) = usize::try_from(*line).ok().and_then(|l| self.clicks.get(l)) else {
+                let Some(Some((f, i))) = usize::try_from(*line).ok().and_then(|l| self.clicks.get(l)).copied() else {
                     return false;
                 };
-                if *i == self.selected {
+                if f == self.focus && i == self.sel(f) {
                     self.open_selected(shared);
                 } else {
-                    self.selected = *i;
-                    self.moved = true;
+                    self.select(f, i);
                 }
                 true
             }
@@ -447,26 +596,14 @@ impl Panel {
             self.fit_width(shared, cols);
         }
         let cols = cols.saturating_sub(1);
-        let mut lines: Vec<Line> = Vec::new();
-        let mut clicks: Vec<Option<usize>> = Vec::new();
-        let top_budget = (rows * 45 / 100).max(6);
 
-        // -- git ------------------------------------------------------------
+        // -- pinned header: directory, branch, summary (with the file counter) -------
+        let mut head: Vec<Line> = Vec::new();
         let cwd = self.cwd.clone().unwrap_or_default();
-        let mut l = Line::new();
-        l.push(&format!("{BOLD}{BLUE}"), &format!(" {}", ui::truncate(ui::basename(&cwd), cols.saturating_sub(2))));
-        lines.push(l);
+        head.push(note(&format!("{BOLD}{BLUE}"), &format!(" {}", ui::truncate(ui::basename(&cwd), cols.saturating_sub(2)))));
         match self.git.state() {
-            GitState::Loading => {
-                let mut l = Line::new();
-                l.push(DIM, "  …");
-                lines.push(l);
-            }
-            GitState::NotRepo => {
-                let mut l = Line::new();
-                l.push(DIM, "  not a git repository");
-                lines.push(l);
-            }
+            GitState::Loading => head.push(note(DIM, "  …")),
+            GitState::NotRepo => head.push(note(DIM, "  not a git repository")),
             GitState::Repo(info) => {
                 let mut l = Line::new();
                 l.push(MAGENTA, &format!("  {}", ui::truncate(&info.branch, cols.saturating_sub(14))));
@@ -476,7 +613,7 @@ impl Panel {
                 if info.behind > 0 {
                     l.push(RED, &format!(" ↓{}", info.behind));
                 }
-                lines.push(l);
+                head.push(l);
                 let mut l = Line::new();
                 if info.files.is_empty() {
                     l.push(DIM, "  clean");
@@ -485,72 +622,105 @@ impl Panel {
                     l.push(GREEN, &format!("+{}", info.added));
                     l.push("", " ");
                     l.push(RED, &format!("-{}", info.deleted));
+                    l.right(DIM, &format!("{}/{} ", self.fsel + 1, self.files.len()), cols);
                 }
-                lines.push(l);
-                let room = top_budget.saturating_sub(lines.len());
-                let overflow = info.files.len() > room;
-                let shown = if overflow { room.saturating_sub(1) } else { info.files.len() };
-                for f in info.files.iter().take(shown) {
-                    let code_style = match f.code.chars().next() {
-                        Some('A') => GREEN,
-                        Some('D') => RED,
-                        Some('R') | Some('C') => BLUE,
-                        Some('?') => CYAN,
-                        _ => YELLOW,
-                    };
-                    let stats = match f.stats {
-                        Some((a, d)) => format!("+{a} -{d} "),
-                        None if f.code == "??" => "new ".into(),
-                        None => String::new(),
-                    };
-                    let mut l = Line::new();
-                    l.push(code_style, &format!("  {:<2} ", f.code));
-                    l.push("", &ui::truncate_left(&f.path, cols.saturating_sub(6 + stats.len() + 1)));
-                    l.right(DIM, &stats, cols);
-                    lines.push(l);
-                }
-                if overflow {
-                    let mut l = Line::new();
-                    l.push(DIM, &format!("  … {} more", info.files.len() - shown));
-                    lines.push(l);
-                }
+                head.push(l);
             }
         }
-        clicks.resize(lines.len(), None);
 
-        // -- sessions -------------------------------------------------------
+        // -- split the remaining rows between the two lists -------------------------
+        let status_rows = usize::from(self.status.is_some());
+        let body = rows.saturating_sub(head.len() + status_rows).max(1);
+        let avail = body.saturating_sub(2); // separator + SESSIONS header
+        let (want_f, want_s) = (self.files.len(), self.sessions.len().max(1));
+        let f_h = if want_f + want_s <= avail {
+            want_f
+        } else {
+            let half = avail / 2;
+            if want_f <= half {
+                want_f
+            } else if want_s <= avail - half {
+                avail - want_s
+            } else {
+                half
+            }
+        };
+        let s_h = avail.saturating_sub(f_h);
+
+        // each list keeps its own cursor in view; nothing else scrolls it
+        fn keep_visible(sel: usize, scroll: &mut usize, h: usize, n: usize) {
+            if sel < *scroll {
+                *scroll = sel;
+            } else if h > 0 && sel >= *scroll + h {
+                *scroll = sel + 1 - h;
+            }
+            *scroll = (*scroll).min(n.saturating_sub(h));
+        }
+        keep_visible(self.fsel, &mut self.fscroll, f_h, self.files.len());
+        keep_visible(self.ssel, &mut self.sscroll, s_h, self.sessions.len());
+
+        let mut lines = head;
+        let mut clicks: Vec<Option<(Focus, usize)>> = vec![None; lines.len()];
+        let marker = |selected: bool, focused: bool| match (selected, focused) {
+            (true, true) => (MAGENTA, " ▌"),
+            (true, false) => (DIM, " ▎"),
+            _ => ("", "  "),
+        };
+
+        // -- files -----------------------------------------------------------------
+        for (i, f) in self.files.iter().enumerate().skip(self.fscroll).take(f_h) {
+            let sel = i == self.fsel;
+            let focused = self.focus == Focus::Files;
+            let code_style = match f.code.chars().next() {
+                Some('A') => GREEN,
+                Some('D') => RED,
+                Some('R') | Some('C') => BLUE,
+                Some('?') => CYAN,
+                _ => YELLOW,
+            };
+            let stats = match f.stats {
+                Some((a, d)) => format!("+{a} -{d} "),
+                None if f.code == "??" => "new ".into(),
+                None => String::new(),
+            };
+            let (mstyle, mtext) = marker(sel, focused);
+            let mut l = Line::new();
+            l.push(mstyle, mtext);
+            l.push(code_style, &format!("{:<2} ", f.code));
+            l.push(if sel && focused { BOLD } else { "" }, &ui::truncate_left(&f.path, cols.saturating_sub(6 + stats.len() + 1)));
+            l.right(DIM, &stats, cols);
+            lines.push(l);
+            clicks.push(Some((Focus::Files, i)));
+        }
+
+        // -- sessions --------------------------------------------------------------
         let mut sep = Line::new();
         sep.push(DIM, &"─".repeat(cols.saturating_sub(1)));
         lines.push(sep);
+        clicks.push(None);
         let mut h = Line::new();
         h.push(BOLD, &format!(" SESSIONS {}", self.sessions.len()));
-        h.right(DIM, "↑↓ ⏎ r q ", cols);
-        lines.push(h);
-        clicks.resize(lines.len(), None);
-
-        let status_rows = usize::from(self.status.is_some());
-        let room = rows.saturating_sub(lines.len() + status_rows).max(1);
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + room {
-            self.scroll = self.selected + 1 - room;
+        if !self.sessions.is_empty() {
+            h.right(DIM, &format!("{}/{} ", self.ssel + 1, self.sessions.len()), cols);
         }
-        if self.sessions.is_empty() {
-            let mut l = Line::new();
-            l.push(DIM, if self.host_ready { "  no sessions for this directory" } else { "  …" });
-            lines.push(l);
+        lines.push(h);
+        clicks.push(None);
+        if self.sessions.is_empty() && s_h > 0 {
+            lines.push(note(DIM, if self.host_ready { "  no sessions for this directory" } else { "  …" }));
             clicks.push(None);
         }
         let now = now_secs();
-        for (i, s) in self.sessions.iter().enumerate().skip(self.scroll).take(room) {
-            let sel = i == self.selected;
+        for (i, s) in self.sessions.iter().enumerate().skip(self.sscroll).take(s_h) {
+            let sel = i == self.ssel;
+            let focused = self.focus == Focus::Sessions;
             let (tag, tag_style) = match s.kind {
                 Kind::Claude => ("CC", YELLOW),
                 Kind::Codex => ("CX", CYAN),
             };
             let age = format!(" {} ", ui::age(now.saturating_sub(s.updated)));
+            let (mstyle, mtext) = marker(sel, focused);
             let mut l = Line::new();
-            l.push(MAGENTA, if sel { " ▌" } else { "  " });
+            l.push(mstyle, mtext);
             l.push(tag_style, tag);
             if self.running.contains_key(&s.id) {
                 l.push(GREEN, "●");
@@ -558,22 +728,25 @@ impl Panel {
                 l.push("", " ");
             }
             l.push("", " ");
-            let title = ui::truncate(&s.title, cols.saturating_sub(7 + age.len()));
-            l.push(if sel { BOLD } else { "" }, &title);
+            l.push(if sel && focused { BOLD } else { "" }, &ui::truncate(&s.title, cols.saturating_sub(7 + age.len())));
             l.right(DIM, &age, cols);
             lines.push(l);
-            clicks.push(Some(i));
+            clicks.push(Some((Focus::Sessions, i)));
         }
         if let Some(st) = &self.status {
             while lines.len() + 1 < rows {
                 lines.push(Line::new());
                 clicks.push(None);
             }
-            let mut l = Line::new();
-            l.push(DIM, &format!(" {}", ui::truncate(st, cols.saturating_sub(2))));
-            lines.push(l);
+            lines.push(note(DIM, &format!(" {}", ui::truncate(st, cols.saturating_sub(2)))));
         }
         self.clicks = clicks;
         ui::print_lines(&lines, rows, cols);
     }
+}
+
+fn note(style: &str, text: &str) -> Line {
+    let mut l = Line::new();
+    l.push(style, text);
+    l
 }

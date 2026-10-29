@@ -6,7 +6,7 @@
 
 - **左侧竖向标签栏**，按**工作目录分组**；点击分组标题折叠/展开，点击标签切换。
 - **右侧 Git + 会话面板**（点击或快捷键呼出）：
-  - 上半：目录名、分支（领先/落后）、改动文件及 `+新增 -删除` 行数；
+  - 上半：目录名、分支（领先/落后）、改动文件及 `+新增 -删除` 行数；在文件上按 `Enter` 会在浮层里打开**左右对比的 diff**；
   - 下半：该目录下的 **Claude Code 与 Codex 历史会话**（最近的在前），`↑/↓` + `Enter`（或点击）恢复：
     - 已在某个 pane 里运行（标记 `●`）→ 直接跳过去；
     - 当前 shell 空闲 → 在当前窗口输入 `claude --resume <id>` / `codex resume <id>`；
@@ -74,7 +74,8 @@ macOS 上 `Alt` 需要终端开启 “Option 当 Alt/Meta”（kitty：`macos_op
 | | |
 |---|---|
 | 左侧栏 | 点分组标题折叠；点一行切换；`+ new tab` 在当前目录新开；滚轮滚动 |
-| 面板 | `j`/`k`/`↑`/`↓` 移动，`Enter` 或再点选中行打开，`r` 刷新，`q`/`Esc` 关闭 |
+| 面板 | 文件和会话是两个独立的列表，各有自己的光标、滚动和计数（文件摘要旁是 `3/18`，SESSIONS 旁是 `5/50`）：`j`/`k`/`↑`/`↓` 只在当前列表内移动，到头就停，`Tab` 切换列表，`Enter` 或再点选中行打开（文件 → diff 浮层，会话 → 恢复），`g`/`G` 第一个/最后一个，`r` 刷新，`q`/`Esc` 关闭 |
+| diff 浮层 | `j`/`k` 滚动，`space`/`b` 翻页，`n`/`p` 下/上一个改动块，`]`/`[`（或 `Tab`/`Shift+Tab`）下/上一个改动文件，`h`/`l` 横向滚动，`g`/`G` 顶部/底部，`q`/`Esc` 关闭 |
 | `CC`/`CX` 后的 `●` | 该会话正在当前 zellij 会话的某个 pane 中运行 |
 
 ### 配置
@@ -120,6 +121,7 @@ Linux/macOS 上的 bash/zsh/fish 不需要。
 - Codex 的会话列表在 `~/.codex/state_<n>.sqlite`，wasm 插件读不了，所以用一个小型原生程序（`helper/`）列出 `codex resume` 会显示的线程（未归档、来源为 `cli`/`vscode`）。
 - “运行中”检测：helper 遍历每个 pane 的 shell 子进程。Claude 用 `~/.claude/sessions/<pid>.json`；Codex 用命令行里的 `codex resume <id>`（直接敲 `codex` 启动的识别不到）。
 - “空闲”＝ pane 的前台进程是 shell。
+- diff 浮层是同一个插件的第三种模式（`diff`），以浮动 pane 打开；它执行 `git diff HEAD -- <文件>`（未跟踪文件用 `--no-index` 对比 `/dev/null`），把删除/新增行对齐成左右两列。
 
 ## 常见问题
 
@@ -135,6 +137,7 @@ Linux/macOS 上的 bash/zsh/fish 不需要。
 cargo build --release                      # 插件 -> target/wasm32-wasip1/release/zj-sidebar.wasm
 cargo build --release --manifest-path helper/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 bash scripts/helper-smoke-test.sh helper/target/<host>/release/zjsb-helper   # Linux/macOS
+rustc --test --edition 2024 src/diffparse.rs -o /tmp/dp && /tmp/dp               # diff 解析单元测试
 ```
 
 发布：推送 `vX.Y.Z` 标签，工作流会构建 wasm 插件和各平台 helper（Windows x64、Linux x64/arm64 静态 musl、macOS x64/arm64），连同 `SHA256SUMS` 一起发布。
