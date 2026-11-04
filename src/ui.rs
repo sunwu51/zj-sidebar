@@ -181,3 +181,18 @@ pub fn is_shell(argv0: &str) -> bool {
     let name = name.strip_suffix(".exe").unwrap_or(&name);
     SHELLS.contains(&name)
 }
+
+/// Program and arguments that run `cmd` through `shell` and then leave that shell open,
+/// so a command pane started this way stays usable after the command exits.
+pub fn shell_command(shell: &str, cmd: &str) -> (String, Vec<String>) {
+    let name = basename(shell).trim_start_matches('-').to_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name).to_string();
+    let args: Vec<String> = match name.as_str() {
+        "pwsh" | "powershell" => vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), cmd.into()],
+        "cmd" => vec!["/k".into(), cmd.into()],
+        "nu" => vec!["-e".into(), cmd.into()],
+        // bash, zsh, fish, sh, ...: run it in an interactive shell, then stay in a new one
+        _ => vec!["-ic".into(), format!("{cmd}; exec '{}'", shell.replace('\'', "'\\''"))],
+    };
+    (shell.to_string(), args)
+}

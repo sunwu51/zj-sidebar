@@ -331,6 +331,9 @@ impl TabsView {
             match fresh {
                 Some(p) if !p.is_suppressed => {
                     // `target_pane` makes the config unique, so this always launches a new panel
+                    let mut config = config;
+                    // the panel must never mistake this throwaway pane for the user's shell
+                    config.insert("placeholder".into(), p.id.to_string());
                     pipe_message_to_plugin(
                         MessageToPlugin::new("open")
                             .with_plugin_url(url)

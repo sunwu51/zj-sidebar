@@ -55,14 +55,18 @@ pub struct Panel {
     clicks: Vec<Option<(Focus, usize)>>,
     tick: u64,
     status: Option<String>,
-    /// (tab id, command, give-up tick) for a session opened in a new tab
-    pending_tab: Option<(usize, String, u64)>,
-    /// (pane id, command, tick to type it anyway) waiting for the new shell's prompt
-    pending_write: Option<(u32, String, u64)>,
+    /// pane the tab's throwaway placeholder lives in; never a launch target
+    ignore: Option<u32>,
+    /// shell used for new tabs when the target pane's own shell is unknown
+    default_shell: String,
+    /// when the last launch started (ms), so repeated clicks/Enters don't launch twice
+    last_launch_ms: u128,
     resize_steps: u32,
     /// our width when the last resize was requested
     resize_from: Option<usize>,
-    focused_once: bool,
+    /// whether the panel has had keyboard focus yet, and how often we tried to give it
+    got_focus: bool,
+    focus_tries: u8,
     last_resize: Option<Resize>,
 }
 
@@ -111,6 +115,7 @@ impl Panel {
         self.cwd = shared.cfg("target_cwd").map(String::from);
         self.home = shared.cfg("home").map(PathBuf::from);
         self.helper = shared.cfg("helper").unwrap_or("").to_string();
+        self.ignore = shared.cfg("placeholder").and_then(|s| s.parse().ok());
     }
 
     fn on_granted(&mut self) {
@@ -121,6 +126,11 @@ impl Panel {
         if self.helper.is_empty() {
             self.helper = default_helper(&env);
         }
+        self.default_shell = if env.get("OS").is_some_and(|os| os == "Windows_NT") {
+            "pwsh".to_string()
+        } else {
+            env.get("SHELL").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| "sh".to_string())
+        };
         match &self.home {
             Some(h) => change_host_folder(h.clone()),
             None => self.status = Some("cannot find home dir (set `home` in config)".into()),
@@ -216,15 +226,30 @@ impl Panel {
         self.restore_sel();
     }
 
+    /// The tab's own shell panes: tiled terminals, not our placeholder, not exited.
+    fn candidates<'a>(&self, shared: &'a Shared) -> Vec<&'a PaneInfo> {
+        let Some(pos) = shared.my_tab() else { return Vec::new() };
+        shared
+            .panes
+            .panes
+            .get(&pos)
+            .map(|ps| {
+                ps.iter()
+                    .filter(|p| !p.is_plugin && !p.is_floating && !p.is_suppressed && !p.exited)
+                    .filter(|p| Some(p.id) != self.ignore)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Follow the focused terminal pane of this tab (ignoring the panel itself).
     fn track_target(&mut self, shared: &Shared) {
-        let Some(pos) = shared.my_tab() else { return };
-        if let Some(panes) = shared.panes.panes.get(&pos) {
-            if let Some(p) = panes
-                .iter()
-                .find(|p| !p.is_plugin && p.is_focused && !p.is_floating && !p.is_suppressed) {
-                self.target = Some(p.id);
-            }
+        let c = self.candidates(shared);
+        if let Some(p) = c.iter().find(|p| p.is_focused) {
+            self.target = Some(p.id);
+        } else if self.target.is_none_or(|t| !c.iter().any(|p| p.id == t)) {
+            // the remembered pane is gone (or we never had one): any shell of the tab will do
+            self.target = c.first().map(|p| p.id);
         }
     }
 
@@ -251,45 +276,14 @@ impl Panel {
         true
     }
 
-    fn handle_pending(&mut self, shared: &Shared) {
-        if let Some((tab_id, cmd, deadline)) = self.pending_tab.take() {
-            let pane = shared
-                .tabs
-                .iter()
-                .find(|t| t.tab_id == tab_id)
-                .and_then(|t| shared.main_pane(t.position))
-                .map(|p| p.id);
-            match pane {
-                Some(p) => self.pending_write = Some((p, cmd, self.tick + 10)),
-                None if self.tick < deadline => self.pending_tab = Some((tab_id, cmd, deadline)),
-                None => self.status = Some("new tab did not appear".into()),
-            }
-        }
-        if let Some((pane, cmd, deadline)) = self.pending_write.take() {
-            // Type once the shell has drawn its prompt (cursor moved off column 0);
-            // keys sent while it is still starting up can be dropped.
-            let ready = shared
-                .panes
-                .panes
-                .values()
-                .flatten()
-                .find(|p| !p.is_plugin && p.id == pane)
-                .and_then(|p| p.cursor_coordinates_in_pane)
-                .is_some_and(|(x, _)| x > 0);
-            if ready || self.tick >= deadline {
-                write_chars_to_pane_id(&format!("{cmd}\r"), PaneId::Terminal(pane));
-                self.status = Some("opened in a new tab".into());
-            } else {
-                self.pending_write = Some((pane, cmd, deadline));
-            }
-        }
-    }
-
-    fn target_is_idle(&self) -> bool {
-        let Some(t) = self.target else { return false };
-        match get_pane_running_command(PaneId::Terminal(t)) {
-            Ok(argv) => argv.first().is_none_or(|a| ui::is_shell(a)),
-            Err(_) => false,
+    /// The shell running in the target pane, if the pane is sitting at a prompt.
+    fn idle_shell(&self) -> Option<String> {
+        let t = self.target?;
+        let argv = get_pane_running_command(PaneId::Terminal(t)).ok()?;
+        match argv.first() {
+            Some(a) if ui::is_shell(a) => Some(a.clone()),
+            Some(_) => None,
+            None => Some(String::new()), // nothing known to be running
         }
     }
 
@@ -391,24 +385,42 @@ impl Panel {
     }
 
     fn launch(&mut self, shared: &Shared, s: Session) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if now.saturating_sub(self.last_launch_ms) < 2500 {
+            return; // a double click / key repeat; the first request is still being carried out
+        }
+        self.last_launch_ms = now;
+
         let cmd = match s.kind {
             Kind::Claude => format!("{} --resume {}", shared.cfg("claude_cmd").unwrap_or("claude"), s.id),
             Kind::Codex => format!("{} resume {}", shared.cfg("codex_cmd").unwrap_or("codex"), s.id),
         };
-        match self.target {
-            Some(t) if self.target_is_idle() => {
-                write_chars_to_pane_id(&format!("{cmd}\r"), PaneId::Terminal(t));
-                focus_pane_with_id(PaneId::Terminal(t), false, false);
-                self.status = Some("resumed in this tab".into());
-            }
-            _ => match new_tab(None, self.cwd.clone()) {
-                Some(id) => {
-                    self.pending_tab = Some((id, cmd, self.tick + 10));
-                    self.status = Some("tab busy → opening a new tab…".into());
-                }
-                None => self.status = Some("failed to open a new tab".into()),
-            },
+        self.track_target(shared);
+        let idle = self.idle_shell();
+        if let (Some(t), Some(_)) = (self.target, &idle) {
+            write_chars_to_pane_id(&format!("{cmd}\r"), PaneId::Terminal(t));
+            focus_pane_with_id(PaneId::Terminal(t), false, false);
+            self.status = Some("resumed in this tab".into());
+            return;
         }
+        // Busy: open a tab that runs the command through the user's shell (and stays open
+        // afterwards). Nothing is typed into a shell that may not be ready yet.
+        let shell = idle
+            .filter(|s| !s.is_empty())
+            .or_else(|| shared.cfg("shell").map(String::from))
+            .unwrap_or_else(|| self.default_shell.clone());
+        let (path, args) = ui::shell_command(&shell, &cmd);
+        let (tab, _) = open_command_pane_in_new_tab(
+            CommandToRun { path: path.into(), args, cwd: self.cwd.clone().map(PathBuf::from) },
+            BTreeMap::new(),
+        );
+        self.status = Some(match tab {
+            Some(_) => "tab busy → opened in a new tab".into(),
+            None => "failed to open a new tab".into(),
+        });
     }
 
     /// Move within the focused list only; stops at the first/last row.
@@ -438,17 +450,21 @@ impl Panel {
                 true
             }
             Event::TabUpdate(_) | Event::PaneUpdate(_) => {
-                if !self.focused_once && shared.my_pane().is_some_and(|p| !p.is_suppressed) {
-                    self.focused_once = true;
-                    focus_pane_with_id(PaneId::Plugin(shared.my_id), false, false);
+                // Take keyboard focus when the panel appears. The first attempt can lose to
+                // zellij still rearranging the placeholder, so retry a few times.
+                if let Some(me) = shared.my_pane().filter(|p| !p.is_suppressed) {
+                    if me.is_focused {
+                        self.got_focus = true;
+                    } else if !self.got_focus && self.focus_tries < 6 {
+                        self.focus_tries += 1;
+                        focus_pane_with_id(PaneId::Plugin(shared.my_id), false, false);
+                    }
                 }
                 self.track_target(shared);
-                self.handle_pending(shared);
                 true
             }
             Event::Timer(_) => {
                 self.tick += 1;
-                self.handle_pending(shared);
                 let changed = self.tick % 2 == 0 && self.refresh_cwd(shared);
                 if !changed {
                     if self.tick % 3 == 0 {
