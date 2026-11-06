@@ -19,6 +19,18 @@ keybinds {
                 name "toggle_panel"
             }
         }
+        // Move the keyboard into the git panel (opening it if needed); again: back to the shell.
+        bind "Alt g" {
+            MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" {
+                name "focus_panel"
+            }
+        }
+        // Open the Git Log window for the current shell's repository.
+        bind "Alt Shift g" {
+            MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" {
+                name "git_log"
+            }
+        }
 
         // Show/hide a floating scratch shell (zellij built-in; the default is Alt+f).
         bind "Alt j" { ToggleFloatingPanes; }

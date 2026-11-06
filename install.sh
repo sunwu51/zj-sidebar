@@ -132,9 +132,12 @@ Try it now:
 Make it the default: add this line to $CONFIG_DIR/config.kdl
     default_layout "sidebar"
 
-Optional keybinding (Alt+d toggles the git/sessions panel), inside
+Optional keybindings (Alt+d toggles the git/sessions panel, Alt+g moves focus
+into it and back, Alt+Shift+g opens the Git Log), inside
 keybinds { shared_except "locked" { ... } } in config.kdl:
     bind "Alt d" { MessagePlugin "$PLUGIN_URL" { name "toggle_panel"; }; }
+    bind "Alt g" { MessagePlugin "$PLUGIN_URL" { name "focus_panel"; }; }
+    bind "Alt Shift g" { MessagePlugin "$PLUGIN_URL" { name "git_log"; }; }
 (or just click "git · sessions" at the bottom of the left sidebar)
 
 A ready-to-copy config with all of this: https://github.com/sunwu51/zj-sidebar/blob/main/examples/config.kdl

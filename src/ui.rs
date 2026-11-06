@@ -12,6 +12,7 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const BLUE: &str = "\x1b[34m";
 pub const MAGENTA: &str = "\x1b[35m";
 pub const CYAN: &str = "\x1b[36m";
+pub const REVERSE: &str = "\x1b[7m";
 
 pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -89,10 +90,11 @@ pub fn truncate_left(s: &str, max: usize) -> String {
     out
 }
 
-/// One rendered row: styled text plus its visible (unstyled) width.
+/// One rendered row: styled segments plus their visible (unstyled) width. Keeping the
+/// segments (instead of one escaped string) lets rows be cut, padded and drawn over.
 #[derive(Default, Clone)]
 pub struct Line {
-    pub text: String,
+    segs: Vec<(String, String)>,
     pub width: usize,
 }
 
@@ -104,10 +106,8 @@ impl Line {
         if s.is_empty() {
             return self;
         }
-        self.text.push_str(style);
-        self.text.push_str(s);
-        self.text.push_str(RESET);
         self.width += width(s);
+        self.segs.push((style.to_string(), s.to_string()));
         self
     }
     /// Append `right` flush to the right edge of a `cols` wide row.
@@ -115,11 +115,160 @@ impl Line {
         let rw = width(right);
         if self.width + rw + 1 <= cols {
             let gap = cols - self.width - rw;
-            self.text.push_str(&" ".repeat(gap));
-            self.width += gap;
+            self.push("", &" ".repeat(gap));
             self.push(style, right);
         }
         self
+    }
+    pub fn append(&mut self, other: &Line) -> &mut Self {
+        for (st, t) in &other.segs {
+            self.push(st, t);
+        }
+        self
+    }
+    /// Pad with spaces (in `style`) up to `w` columns.
+    pub fn pad(&mut self, w: usize, style: &str) -> &mut Self {
+        if self.width < w {
+            self.push(style, &" ".repeat(w - self.width));
+        }
+        self
+    }
+    /// `w` columns of this row starting `skip` columns in.
+    pub fn slice(&self, skip: usize, w: usize) -> Line {
+        let mut out = Line::new();
+        let mut col = 0;
+        for (st, t) in &self.segs {
+            let tw = width(t);
+            let (from, to) = (col, col + tw);
+            col = to;
+            if to <= skip {
+                continue;
+            }
+            if out.width >= w {
+                break;
+            }
+            let start = skip.saturating_sub(from);
+            out.push(st, &slice_cols(t, start, w - out.width));
+        }
+        out
+    }
+    /// Exactly `w` columns: cut, then padded.
+    pub fn fit(&self, w: usize) -> Line {
+        let mut l = self.slice(0, w);
+        l.pad(w, "");
+        l
+    }
+    /// Draw `top` over this row starting at column `at`.
+    pub fn overlay(&mut self, at: usize, top: &Line) {
+        let mut out = self.slice(0, at);
+        out.pad(at, "");
+        out.append(top);
+        out.append(&self.slice(at + top.width, usize::MAX / 2));
+        *self = out;
+    }
+    /// Prefix every segment with `style` (e.g. reverse video for a selected row).
+    pub fn restyle(&mut self, style: &str) -> &mut Self {
+        for (st, _) in &mut self.segs {
+            *st = format!("{style}{st}");
+        }
+        self
+    }
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (st, t) in &self.segs {
+            if st.is_empty() {
+                out.push_str(t);
+            } else {
+                out.push_str(st);
+                out.push_str(t);
+                out.push_str(RESET);
+            }
+        }
+        out
+    }
+}
+
+pub fn line(style: &str, text: &str) -> Line {
+    let mut l = Line::new();
+    l.push(style, text);
+    l
+}
+
+/// Wrap `text` into rows of at most `w` columns (breaking at spaces when possible).
+pub fn wrap(text: &str, w: usize) -> Vec<String> {
+    let w = w.max(1);
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut cur = String::new();
+        for word in para.split(' ') {
+            let ww = width(word);
+            if !cur.is_empty() && width(&cur) + 1 + ww > w {
+                out.push(std::mem::take(&mut cur));
+            }
+            if ww > w {
+                // a single overlong word: hard-break it
+                let mut rest = word.to_string();
+                while width(&rest) > w {
+                    let mut head = slice_cols(&rest, 0, w);
+                    if head.is_empty() {
+                        head = rest.chars().next().map(String::from).unwrap_or_default();
+                    }
+                    rest = rest[head.len()..].to_string();
+                    out.push(head);
+                }
+                cur = rest;
+                continue;
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        out.push(cur);
+    }
+    out
+}
+
+/// A bordered box `w` columns wide around `body` rows, with a title in the top border
+/// and an optional hint in the bottom one.
+pub fn boxed(title: &str, hint: &str, body: &[Line], w: usize, border: &str) -> Vec<Line> {
+    let inner = w.saturating_sub(2);
+    let mut out = Vec::with_capacity(body.len() + 2);
+    let mut top = Line::new();
+    let t = truncate(title, inner.saturating_sub(3));
+    top.push(border, "╭─");
+    if !t.is_empty() {
+        top.push(&format!("{BOLD}"), &format!(" {t} "));
+    }
+    let used = top.width;
+    top.push(border, &format!("{}╮", "─".repeat(w.saturating_sub(used + 1))));
+    out.push(top);
+    for b in body {
+        let mut l = Line::new();
+        l.push(border, "│");
+        l.append(&b.fit(inner));
+        l.push(border, "│");
+        out.push(l);
+    }
+    let mut bot = Line::new();
+    let h = truncate(hint, inner.saturating_sub(3));
+    bot.push(border, "╰─");
+    if !h.is_empty() {
+        bot.push(DIM, &format!(" {h} "));
+    }
+    let used = bot.width;
+    bot.push(border, &format!("{}╯", "─".repeat(w.saturating_sub(used + 1))));
+    out.push(bot);
+    out
+}
+
+/// Draw `popup` rows over `lines` at (`x`, `y`), growing `lines` if needed.
+pub fn overlay(lines: &mut Vec<Line>, x: usize, y: usize, popup: &[Line]) {
+    for (i, p) in popup.iter().enumerate() {
+        while lines.len() <= y + i {
+            lines.push(Line::new());
+        }
+        lines[y + i].overlay(x, p);
     }
 }
 
@@ -130,7 +279,7 @@ pub fn print_lines(lines: &[Line], rows: usize, _cols: usize) {
     let mut out = String::from("\x1b[3J");
     for i in 0..rows {
         if let Some(l) = lines.get(i) {
-            out.push_str(&l.text);
+            out.push_str(&l.render());
         }
         out.push_str("\x1b[K");
         if i + 1 < rows {

@@ -17,6 +17,8 @@ jobs:
       - run: cargo build --release --target wasm32-wasip1
       - name: Unit tests (diff parser)
         run: rustc --test --edition 2024 src/diffparse.rs -o /tmp/diffparse-tests && /tmp/diffparse-tests
+      - name: Unit tests (git log parsing and graph)
+        run: rustc --test --edition 2024 src/gitlog.rs -o /tmp/gitlog-tests && /tmp/gitlog-tests
 
   helper:
     strategy:

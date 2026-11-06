@@ -1,4 +1,6 @@
-//! Floating overlay (`mode "diff"`): side-by-side `git diff` of one file.
+//! Floating overlay (`mode "diff"`): side-by-side `git diff` of one file: the work tree
+//! against HEAD (from the panel), a commit against its parent (`diff_rev` + `diff_base`,
+//! or `diff_root` for a root commit), or a commit against the work tree (`diff_base` only).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,8 +31,15 @@ pub struct DiffView {
     cwd: String,
     path: String,
     untracked: bool,
-    /// (status code, path) of every changed file, and the position of the current one
-    files: Vec<(String, String)>,
+    /// the source path of a renamed file
+    old: Option<String>,
+    /// commit to show (empty: the work tree)
+    rev: String,
+    /// what it is compared with (empty with a `rev`: a root commit; both empty: HEAD)
+    base: String,
+    root_commit: bool,
+    /// (status code, path, old path) of every changed file, and the position of the current one
+    files: Vec<(String, String, Option<String>)>,
     index: usize,
     state: State,
     scroll: usize,
@@ -45,19 +54,27 @@ impl DiffView {
         self.cwd = shared.cfg("diff_cwd").unwrap_or("").to_string();
         self.path = shared.cfg("diff_path").unwrap_or("").to_string();
         self.untracked = shared.cfg("diff_code") == Some("??");
+        self.rev = shared.cfg("diff_rev").unwrap_or("").to_string();
+        self.base = shared.cfg("diff_base").unwrap_or("").to_string();
+        self.root_commit = shared.cfg("diff_root") == Some("1");
         self.files = shared
             .cfg("diff_files")
             .unwrap_or("")
             .lines()
-            .filter_map(|l| l.split_once('\t'))
-            .map(|(c, p)| (c.to_string(), p.to_string()))
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let code = f.next()?.to_string();
+                let path = f.next()?.to_string();
+                Some((code, path, f.next().filter(|o| !o.is_empty()).map(String::from)))
+            })
             .collect();
         self.index = shared
             .cfg("diff_index")
             .and_then(|i| i.parse().ok())
-            .filter(|&i| self.files.get(i).is_some_and(|(_, p)| *p == self.path))
-            .or_else(|| self.files.iter().position(|(_, p)| *p == self.path))
+            .filter(|&i| self.files.get(i).is_some_and(|(_, p, _)| *p == self.path))
+            .or_else(|| self.files.iter().position(|(_, p, _)| *p == self.path))
             .unwrap_or(0);
+        self.old = self.files.get(self.index).and_then(|f| f.2.clone());
     }
 
     /// Move to the next/previous changed file (stops at the ends).
@@ -67,13 +84,14 @@ impl DiffView {
             return;
         }
         self.index = to as usize;
-        let (code, path) = self.files[self.index].clone();
+        let (code, path, old) = self.files[self.index].clone();
         self.untracked = code == "??";
         self.path = path;
+        self.old = old;
         self.state = State::Loading;
         self.scroll = 0;
         self.hscroll = 0;
-        rename_plugin_pane(get_plugin_ids().plugin_id, &self.path);
+        rename_plugin_pane(get_plugin_ids().plugin_id, &self.title());
         self.start();
     }
 
@@ -95,11 +113,34 @@ impl DiffView {
     }
 
     fn path_args(&self) -> Vec<&str> {
-        if self.untracked { vec!["/dev/null", self.path.as_str()] } else { vec![self.path.as_str()] }
+        if self.untracked {
+            return vec!["/dev/null", self.path.as_str()];
+        }
+        match &self.old {
+            // both sides of a rename, so git can pair them up
+            Some(o) if *o != self.path => vec![o.as_str(), self.path.as_str()],
+            _ => vec![self.path.as_str()],
+        }
+    }
+
+    fn title(&self) -> String {
+        match (self.rev.as_str(), self.base.as_str()) {
+            ("", "") => self.path.clone(),
+            ("", b) => format!("{} @ {} ↔ local", self.path, short(b)),
+            (r, _) => format!("{} @ {}", self.path, short(r)),
+        }
     }
 
     fn start(&self) {
-        if self.untracked {
+        if !self.rev.is_empty() {
+            if self.root_commit {
+                self.run(&["show", "--format=", "--no-color", "-U3", "-M", &self.rev], "commit");
+            } else {
+                self.run(&["diff", "--no-color", "-U3", "-M", &self.base, &self.rev], "commit");
+            }
+        } else if !self.base.is_empty() {
+            self.run(&["diff", "--no-color", "-U3", "-M", &self.base], "commit");
+        } else if self.untracked {
             self.run(&["diff", "--no-color", "--no-index"], "main");
         } else {
             self.run(&["diff", "--no-color", "-U3", "HEAD"], "main");
@@ -196,7 +237,16 @@ impl DiffView {
 
         let mut lines: Vec<Line> = Vec::new();
         let mut head = Line::new();
-        head.push(&format!("{BOLD}{CYAN}"), &format!(" {}", ui::truncate_left(&self.path, cols.saturating_sub(24))));
+        head.push(&format!("{BOLD}{CYAN}"), &format!(" {}", ui::truncate_left(&self.path, cols.saturating_sub(40))));
+        match (self.rev.as_str(), self.base.as_str()) {
+            ("", "") => {}
+            ("", b) => {
+                head.push(DIM, &format!("  {} ↔ work tree", short(b)));
+            }
+            (r, _) => {
+                head.push(DIM, &format!("  @ {}", short(r)));
+            }
+        }
         if let State::Ready(p) = &self.state {
             head.push("", "  ");
             head.push(GREEN, &format!("+{}", p.added));
@@ -274,6 +324,10 @@ impl DiffView {
         l.push(DIM, &prefix);
         l.push(style, &format!("{text}{}", " ".repeat(pad)));
     }
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
 }
 
 fn note(style: &str, text: &str) -> Line {

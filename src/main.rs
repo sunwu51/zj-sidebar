@@ -1,13 +1,19 @@
-//! zj-sidebar: a vertical, directory-grouped tab list (`mode "tabs"`) and a
-//! toggleable git + agent-session panel (`mode "panel"`) for zellij.
+//! zj-sidebar: a vertical, directory-grouped tab list (`mode "tabs"`), a toggleable
+//! git + agent-session panel (`mode "panel"`), and two floating overlays: a side-by-side
+//! diff (`mode "diff"`) and an IDEA-style Git Log window (`mode "log"`).
 
+mod commit;
 mod diff;
 mod diffparse;
 mod git;
+mod gitctl;
+mod gitlog;
+mod gitwin;
 mod panel;
 mod sessions;
 mod tabs;
 mod ui;
+mod widgets;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -15,6 +21,10 @@ use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
 pub const TOGGLE_PIPE: &str = "toggle_panel";
+/// focus the panel (open it if needed), or go back from it to the shell
+pub const FOCUS_PIPE: &str = "focus_panel";
+/// open the Git Log window for the focused shell's directory
+pub const LOG_PIPE: &str = "git_log";
 
 /// zellij may report cwds with a trailing separator (`C:\dir\`); drop it.
 fn clean_cwd(p: PathBuf) -> PathBuf {
@@ -29,6 +39,7 @@ enum Mode {
     Tabs,
     Panel,
     Diff,
+    Log,
 }
 
 /// Session-wide facts both modes need.
@@ -106,6 +117,7 @@ struct State {
     tabs: tabs::TabsView,
     panel: panel::Panel,
     diff: diff::DiffView,
+    log: gitwin::GitWin,
 }
 
 register_plugin!(State);
@@ -115,6 +127,7 @@ impl ZellijPlugin for State {
         self.mode = match configuration.get("mode").map(String::as_str) {
             Some("panel") => Mode::Panel,
             Some("diff") => Mode::Diff,
+            Some("log") => Mode::Log,
             _ => Mode::Tabs,
         };
         self.shared.config = configuration;
@@ -131,6 +144,7 @@ impl ZellijPlugin for State {
             PermissionType::ReadSessionEnvironmentVariables,
             PermissionType::ReadCliPipes,
             PermissionType::RunActionsAsUser,
+            PermissionType::WriteToClipboard,
         ]);
         let mut events = vec![
             EventType::PermissionRequestResult,
@@ -159,10 +173,35 @@ impl ZellijPlugin for State {
             ];
             self.diff.load(&self.shared);
         }
+        if self.mode == Mode::Log {
+            events = vec![
+                EventType::PermissionRequestResult,
+                EventType::Key,
+                EventType::Mouse,
+                EventType::RunCommandResult,
+            ];
+            self.log.load(&self.shared);
+        }
         subscribe(&events);
     }
 
     fn update(&mut self, event: Event) -> bool {
+        // Some terminals (and ConPTY) deliver Enter as LF / CR with Ctrl: Ctrl+J / Ctrl+M.
+        // (Alt+Enter, the commit message's new line, then arrives as Alt+Ctrl+J.)
+        let event = match event {
+            Event::Key(k)
+                if matches!(k.bare_key, BareKey::Char('j') | BareKey::Char('m'))
+                    && k.key_modifiers.contains(&KeyModifier::Ctrl)
+                    && k.key_modifiers.iter().all(|m| matches!(m, KeyModifier::Ctrl | KeyModifier::Alt)) =>
+            {
+                let mut e = KeyWithModifier::new(BareKey::Enter);
+                if k.key_modifiers.contains(&KeyModifier::Alt) {
+                    e = e.with_alt_modifier();
+                }
+                Event::Key(e)
+            }
+            e => e,
+        };
         match &event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 self.shared.permitted = true;
@@ -178,6 +217,7 @@ impl ZellijPlugin for State {
             Mode::Tabs => self.tabs.update(&mut self.shared, &event),
             Mode::Panel => self.panel.update(&mut self.shared, &event),
             Mode::Diff => self.diff.update(&mut self.shared, &event),
+            Mode::Log => self.log.update(&mut self.shared, &event),
         }
     }
 
@@ -192,6 +232,14 @@ impl ZellijPlugin for State {
             self.tabs.toggle_panel(&mut self.shared);
             return false;
         }
+        if msg.name == FOCUS_PIPE {
+            self.tabs.focus_panel(&mut self.shared);
+            return false;
+        }
+        if msg.name == LOG_PIPE {
+            self.tabs.open_git_log(&mut self.shared);
+            return false;
+        }
         let from = match msg.source {
             PipeSource::Plugin(id) => Some(id),
             _ => None,
@@ -204,6 +252,7 @@ impl ZellijPlugin for State {
             Mode::Tabs => self.tabs.render(&mut self.shared, rows, cols),
             Mode::Panel => self.panel.render(&mut self.shared, rows, cols),
             Mode::Diff => self.diff.render(&mut self.shared, rows, cols),
+            Mode::Log => self.log.render(&mut self.shared, rows, cols),
         }
     }
 }

@@ -60,6 +60,20 @@ pub struct TabsView {
     known_terms: Vec<u32>,
     /// placeholder pane to close once it resurfaces, and whether it was seen suppressed
     placeholder: Option<(u32, bool)>,
+    /// the tab's terminal pane that had focus last; focus returns there from the panel
+    last_term: Option<u32>,
+    /// focus change requested from a pipe, carried out on the next timer
+    focus_requested: Option<PaneId>,
+    /// Git Log window requested from a pipe: (plugin url, directory)
+    log_requested: Option<(String, String)>,
+    last_focus_pipe: u128,
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 fn tab_label(tab: &TabInfo, pane: Option<&PaneInfo>, all: &[PaneInfo]) -> String {
@@ -159,6 +173,11 @@ impl TabsView {
                     Self::broadcast(shared, COLLAPSED_REQUEST_PIPE, String::new());
                 }
                 self.place_panel(shared);
+                if let Some(t) = shared.my_tab().and_then(|pos| shared.panes.panes.get(&pos)).and_then(|ps| {
+                    ps.iter().find(|p| p.is_focused && self.is_user_term(p)).map(|p| p.id)
+                }) {
+                    self.last_term = Some(t);
+                }
                 let active = shared.my_tab_active();
                 if active && !self.was_active && shared.permitted {
                     self.refresh_cwds(shared);
@@ -169,6 +188,12 @@ impl TabsView {
             Event::Timer(elapsed) => {
                 if let Some(url) = self.open_requested.take() {
                     self.open_panel(shared, url);
+                }
+                if let Some(id) = self.focus_requested.take() {
+                    focus_pane_with_id(id, false, false);
+                }
+                if let Some((url, cwd)) = self.log_requested.take() {
+                    Self::launch_git_log(url, cwd);
                 }
                 if *elapsed < REFRESH_SECS / 2.0 {
                     return false; // the one-shot open timer, not the refresh loop
@@ -227,14 +252,118 @@ impl TabsView {
     }
 
     /// Open the panel to the right of the current tab, or close it if it is open.
+    /// Pipes reach every tab's instance; only the one in the focused tab acts. Background
+    /// instances can hold stale tab state, so ask zellij where the focus is right now.
+    fn in_focused_tab(shared: &Shared) -> bool {
+        match (get_focused_pane_info(), shared.my_tab()) {
+            (Ok((tab, _)), Some(pos)) => tab == pos,
+            _ => shared.my_tab_active(),
+        }
+    }
+
+    /// The panel of this tab (tiled; floating instances of the plugin are overlays).
+    fn find_panel<'a>(shared: &'a Shared, pos: usize, url: &str) -> Option<&'a PaneInfo> {
+        shared.panes.panes.get(&pos)?.iter().find(|p| {
+            p.is_plugin
+                && p.id != shared.my_id
+                && !p.is_floating
+                && (p.title == PANEL_TITLE || p.plugin_url.as_deref() == Some(url))
+        })
+    }
+
+    /// A shell of the user's: a tiled terminal, not the panel's throwaway placeholder.
+    fn is_user_term(&self, p: &PaneInfo) -> bool {
+        !p.is_plugin
+            && !p.is_floating
+            && !p.is_suppressed
+            && !p.exited
+            && p.title != PLACEHOLDER_TITLE
+            && self.placeholder.map(|(id, _)| id) != Some(p.id)
+    }
+
+    /// Where focus goes back to from the panel: the shell used last, if it's still there.
+    fn back_target(&self, shared: &Shared, pos: usize) -> Option<u32> {
+        let panes = shared.panes.panes.get(&pos)?;
+        let ok = |id: u32| panes.iter().any(|p| p.id == id && self.is_user_term(p));
+        self.last_term
+            .filter(|&id| ok(id))
+            .or_else(|| panes.iter().find(|p| self.is_user_term(p)).map(|p| p.id))
+    }
+
+    fn opening(&self) -> bool {
+        self.open_requested.is_some() || self.pending_panel.is_some() || matches!(self.placeholder, Some((_, false)))
+    }
+
+    /// `focus_panel` pipe: move the keyboard into the panel (opening it if needed), or
+    /// from the panel back to the shell it belongs to.
+    pub fn focus_panel(&mut self, shared: &mut Shared) {
+        if !Self::in_focused_tab(shared) {
+            return;
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.last_focus_pipe) < 300 || self.opening() {
+            return; // delivered twice, or the panel is still being put in place
+        }
+        self.last_focus_pipe = now;
+        let (Some(pos), Some(url)) = (shared.my_tab(), shared.my_pane().and_then(|p| p.plugin_url.clone())) else {
+            return;
+        };
+        match Self::find_panel(shared, pos, &url).map(|p| (p.id, p.is_focused)) {
+            Some((_, true)) => {
+                let back = self.back_target(shared, pos);
+                self.focus_requested = back.map(PaneId::Terminal);
+            }
+            Some((id, false)) => self.focus_requested = Some(PaneId::Plugin(id)),
+            // no panel yet: open one (it takes the focus itself)
+            None => self.open_requested = Some(url),
+        }
+        // actions run from inside a keybinding's pipe are dropped, so act on a timer
+        set_timeout(OPEN_DELAY_SECS);
+    }
+
+    /// `git_log` pipe: open the Git Log window for the directory of the focused shell.
+    pub fn open_git_log(&mut self, shared: &mut Shared) {
+        if !Self::in_focused_tab(shared) {
+            return;
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.last_focus_pipe) < 300 {
+            return;
+        }
+        self.last_focus_pipe = now;
+        let (Some(pos), Some(url)) = (shared.my_tab(), shared.my_pane().and_then(|p| p.plugin_url.clone())) else {
+            return;
+        };
+        let term = self.back_target(shared, pos);
+        let Some(cwd) = term.and_then(|t| shared.cwd_of(t, true)) else { return };
+        self.log_requested = Some((url, cwd.to_string_lossy().into_owned()));
+        set_timeout(OPEN_DELAY_SECS);
+    }
+
+    fn launch_git_log(url: String, cwd: String) {
+        let config = BTreeMap::from([
+            ("mode".to_string(), "log".to_string()),
+            ("log_cwd".to_string(), cwd),
+            ("plugin_url".to_string(), url.clone()),
+            // unique per request, so every press opens a fresh window
+            ("n".to_string(), format!("log{}", now_ms())),
+        ]);
+        let mut msg = MessageToPlugin::new("open")
+            .with_plugin_url(url)
+            .with_plugin_config(config)
+            .new_plugin_instance_should_float(true)
+            .new_plugin_instance_should_have_pane_title("Git Log")
+            .new_plugin_instance_should_be_focused();
+        if let Some(c) = FloatingPaneCoordinates::new(Some("2%".into()), Some("2%".into()), Some("96%".into()), Some("94%".into()), None, None) {
+            msg = msg.with_floating_pane_coordinates(c);
+        }
+        pipe_message_to_plugin(msg);
+    }
+
     pub fn toggle_panel(&mut self, shared: &mut Shared) {
         // Every tab's instance gets the message and background instances can hold
         // stale tab state, so ask zellij where the focus is right now.
-        let mine = match (get_focused_pane_info(), shared.my_tab()) {
-            (Ok((tab, _)), Some(pos)) => tab == pos,
-            _ => shared.my_tab_active(),
-        };
-        if !mine {
+        if !Self::in_focused_tab(shared) {
             return;
         }
         // A pipe can be delivered twice; don't undo ourselves or start a second
@@ -243,9 +372,7 @@ impl TabsView {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let opening = self.open_requested.is_some()
-            || self.pending_panel.is_some()
-            || matches!(self.placeholder, Some((_, false)));
+        let opening = self.opening();
         let since = now.saturating_sub(self.last_toggle);
         if since < 400 || (opening && since < 3000) {
             return;
@@ -257,16 +384,7 @@ impl TabsView {
         ) else {
             return;
         };
-        let existing = shared.panes.panes.get(&pos).and_then(|panes| {
-            panes
-                .iter()
-                .find(|p| {
-                    p.is_plugin
-                        && p.id != shared.my_id
-                        && (p.title == PANEL_TITLE || p.plugin_url.as_deref() == Some(&url))
-                })
-                .map(|p| p.id)
-        });
+        let existing = Self::find_panel(shared, pos, &url).map(|p| p.id);
         if let Some(id) = existing {
             close_plugin_pane(id);
             return;

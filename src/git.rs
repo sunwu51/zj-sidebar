@@ -5,7 +5,11 @@ use std::collections::HashMap;
 #[derive(Default, Clone)]
 pub struct GitFile {
     pub code: String,
+    /// the raw two-letter status (index, work tree), e.g. `M `, ` M`, `??`
+    pub xy: String,
     pub path: String,
+    /// the source of a rename/copy (`old -> path`)
+    pub old: Option<String>,
     pub stats: Option<(u64, u64)>,
 }
 
@@ -94,18 +98,19 @@ fn build(status: &str, stats: &HashMap<String, (u64, u64)>) -> GitInfo {
         if line.len() < 4 {
             continue;
         }
-        let code = line[..2].trim().to_string();
+        let xy = line[..2].to_string();
+        let code = xy.trim().to_string();
         let rest = &line[3..];
-        let path = match rest.split_once(" -> ") {
-            Some((_, new)) => unquote(new),
-            None => unquote(rest),
+        let (path, old) = match rest.split_once(" -> ") {
+            Some((old, new)) => (unquote(new), Some(unquote(old))),
+            None => (unquote(rest), None),
         };
         let s = stats.get(&path).copied();
         if let Some((a, d)) = s {
             info.added += a;
             info.deleted += d;
         }
-        info.files.push(GitFile { code, path, stats: s });
+        info.files.push(GitFile { code, xy, path, old, stats: s });
     }
     info
 }

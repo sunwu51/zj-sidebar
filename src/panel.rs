@@ -1,5 +1,6 @@
 //! Right-hand panel: git status of the current directory on top, Claude Code /
-//! Codex sessions for that directory below.
+//! Codex sessions for that directory below. Clicking the branch opens the branch popup
+//! (see `gitctl`); `log` opens the Git Log window (see `gitwin`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
 use crate::git::{GitFile, GitRaw, GitState};
+use crate::gitctl::{GitCtl, HostAct, Out};
 use crate::sessions::{self, now_secs, Kind, Session, SessionScanner, MAX_SESSIONS};
 use crate::ui::{self, Line, BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, YELLOW};
 use crate::Shared;
@@ -68,6 +70,15 @@ pub struct Panel {
     got_focus: bool,
     focus_tries: u8,
     last_resize: Option<Resize>,
+    /// branch popup, branch actions and their git commands
+    ctl: GitCtl,
+    /// tick at which the controller's status last changed (shown for a while)
+    ctl_status: Option<(String, u64)>,
+    /// screen row of the branch line, and the columns of its `log` button
+    branch_row: Option<usize>,
+    log_btn: (usize, usize),
+    /// screen row and columns of the `commit ▸` button on the changes line
+    commit_btn: Option<(usize, usize, usize)>,
 }
 
 /// Where the installers put the native helper, independent of zellij's config dir:
@@ -116,6 +127,10 @@ impl Panel {
         self.home = shared.cfg("home").map(PathBuf::from);
         self.helper = shared.cfg("helper").unwrap_or("").to_string();
         self.ignore = shared.cfg("placeholder").and_then(|s| s.parse().ok());
+        self.ctl.in_panel = true;
+        if let Some(c) = &self.cwd {
+            self.ctl.set_cwd(c);
+        }
     }
 
     fn on_granted(&mut self) {
@@ -136,6 +151,7 @@ impl Panel {
             None => self.status = Some("cannot find home dir (set `home` in config)".into()),
         }
         self.refresh_git();
+        self.ctl.refresh();
         set_timeout(TICK_SECS);
     }
 
@@ -260,6 +276,8 @@ impl Panel {
         if self.cwd.as_deref() == Some(cwd.as_str()) {
             return false;
         }
+        self.ctl.set_cwd(&cwd);
+        self.ctl.refresh();
         self.cwd = Some(cwd);
         self.git = GitRaw::default();
         self.files.clear();
@@ -384,6 +402,54 @@ impl Panel {
         pipe_message_to_plugin(msg);
     }
 
+    /// The Git Log window: a floating plugin pane in mode "log", optionally on one ref.
+    fn open_log(&mut self, shared: &Shared, range: Option<String>) {
+        let Some(cwd) = self.root.clone().or_else(|| self.cwd.clone()) else { return };
+        let Some(url) = shared.my_pane().and_then(|p| p.plugin_url.clone()) else {
+            self.status = Some("cannot find the plugin location".into());
+            return;
+        };
+        let mut config = BTreeMap::from([
+            ("mode".to_string(), "log".to_string()),
+            ("log_cwd".to_string(), cwd),
+            ("plugin_url".to_string(), url.clone()),
+            ("n".to_string(), format!("log{}", self.tick)),
+        ]);
+        if let Some(r) = range {
+            config.insert("log_range".into(), r);
+        }
+        let mut msg = MessageToPlugin::new("open")
+            .with_plugin_url(url)
+            .with_plugin_config(config)
+            .new_plugin_instance_should_float(true)
+            .new_plugin_instance_should_have_pane_title("Git Log")
+            .new_plugin_instance_should_be_focused();
+        if let Some(c) = FloatingPaneCoordinates::new(Some("2%".into()), Some("2%".into()), Some("96%".into()), Some("94%".into()), None, None) {
+            msg = msg.with_floating_pane_coordinates(c);
+        }
+        pipe_message_to_plugin(msg);
+    }
+
+    fn on_host(&mut self, shared: &Shared, h: HostAct) {
+        match h {
+            HostAct::OpenLog(r) => self.open_log(shared, r),
+            HostAct::ShowLog(r) => self.open_log(shared, Some(r)),
+            _ => {}
+        }
+    }
+
+    /// After every event: reload git state when a branch action changed the repository.
+    fn after_ctl(&mut self) {
+        if self.ctl.dirty {
+            self.ctl.dirty = false;
+            self.refresh_git();
+        }
+        let now = self.ctl.status.as_ref().map(|(m, _)| m.clone());
+        if now.is_some() && now.as_ref() != self.ctl_status.as_ref().map(|(m, _)| m) {
+            self.ctl_status = now.map(|m| (m, self.tick));
+        }
+    }
+
     fn launch(&mut self, shared: &Shared, s: Session) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -434,6 +500,78 @@ impl Panel {
     }
 
     pub fn update(&mut self, shared: &mut Shared, event: &Event) -> bool {
+        let r = self.update_inner(shared, event);
+        self.after_ctl();
+        r
+    }
+
+    /// Input for the branch popup / menus / prompts, when one is open (or the branch line).
+    fn ctl_input(&mut self, shared: &Shared, event: &Event) -> Option<bool> {
+        match event {
+            Event::Key(key) => {
+                if self.ctl.modal() {
+                    if let Out::Host(h) = self.ctl.key(key) {
+                        self.on_host(shared, h);
+                    }
+                    return Some(true);
+                }
+                if key.has_no_modifiers() {
+                    match key.bare_key {
+                        BareKey::Char('b') => self.ctl.open_picker(),
+                        BareKey::Char('c') => self.ctl.open_commit(),
+                        BareKey::Char('l') => self.open_log(shared, None),
+                        BareKey::Char('f') => {
+                            self.ctl.perform(crate::gitctl::Act::Fetch);
+                        }
+                        _ => return None,
+                    }
+                    return Some(true);
+                }
+                None
+            }
+            Event::Mouse(Mouse::LeftClick(line, col)) | Event::Mouse(Mouse::RightClick(line, col)) => {
+                let line = usize::try_from(*line).ok()?;
+                if self.ctl.modal() {
+                    if let Out::Host(h) = self.ctl.click(line, *col) {
+                        self.on_host(shared, h);
+                    }
+                    return Some(true);
+                }
+                if let Some((row, x0, x1)) = self.commit_btn {
+                    if line == row && *col >= x0 && *col < x1 {
+                        self.ctl.open_commit();
+                        return Some(true);
+                    }
+                }
+                if self.branch_row == Some(line) {
+                    if *col >= self.log_btn.0 && *col < self.log_btn.1 {
+                        self.open_log(shared, None);
+                    } else {
+                        self.ctl.open_picker();
+                    }
+                    return Some(true);
+                }
+                None
+            }
+            Event::Mouse(Mouse::Hover(line, col)) => {
+                let line = usize::try_from(*line).ok()?;
+                Some(self.ctl.hover(line, *col))
+            }
+            Event::Mouse(Mouse::ScrollUp(_)) => self.ctl.scroll(-1).then_some(true),
+            Event::Mouse(Mouse::ScrollDown(_)) => self.ctl.scroll(1).then_some(true),
+            _ => None,
+        }
+    }
+
+    fn update_inner(&mut self, shared: &mut Shared, event: &Event) -> bool {
+        if let Event::RunCommandResult(code, stdout, stderr, ctx) = event {
+            if self.ctl.on_result(ctx, *code, stdout, stderr) {
+                return true;
+            }
+        }
+        if let Some(r) = self.ctl_input(shared, event) {
+            return r;
+        }
         match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 self.on_granted();
@@ -473,6 +611,10 @@ impl Panel {
                     if self.tick % 5 == 0 {
                         self.refresh_sessions();
                         self.refresh_running(shared, None);
+                    }
+                    if self.tick % 15 == 0 && !self.ctl.busy() {
+                        // branches and a merge/rebase in progress
+                        self.ctl.refresh();
                     }
                 }
                 set_timeout(TICK_SECS);
@@ -617,18 +759,30 @@ impl Panel {
         let mut head: Vec<Line> = Vec::new();
         let cwd = self.cwd.clone().unwrap_or_default();
         head.push(note(&format!("{BOLD}{BLUE}"), &format!(" {}", ui::truncate(ui::basename(&cwd), cols.saturating_sub(2)))));
+        self.branch_row = None;
+        self.commit_btn = None;
         match self.git.state() {
             GitState::Loading => head.push(note(DIM, "  …")),
             GitState::NotRepo => head.push(note(DIM, "  not a git repository")),
             GitState::Repo(info) => {
+                // click: branch popup; `log ▸`: the log window
+                let open = self.ctl.picker.is_some();
                 let mut l = Line::new();
-                l.push(MAGENTA, &format!("  {}", ui::truncate(&info.branch, cols.saturating_sub(14))));
+                let badge = self.ctl.state.map(|op| format!(" {}", op.title())).unwrap_or_default();
+                let room = cols.saturating_sub(20 + badge.len());
+                l.push(MAGENTA, &format!("  ⎇ {}", ui::truncate(&info.branch, room)));
                 if info.ahead > 0 {
                     l.push(GREEN, &format!(" ↑{}", info.ahead));
                 }
                 if info.behind > 0 {
                     l.push(RED, &format!(" ↓{}", info.behind));
                 }
+                l.push(DIM, if open { " ▴" } else { " ▾" });
+                l.push(&format!("{BOLD}{YELLOW}"), &badge);
+                let btn = "log ▸ ";
+                l.right(CYAN, btn, cols);
+                self.log_btn = (cols.saturating_sub(ui::width(btn)), cols);
+                self.branch_row = Some(head.len());
                 head.push(l);
                 let mut l = Line::new();
                 if info.files.is_empty() {
@@ -638,14 +792,31 @@ impl Panel {
                     l.push(GREEN, &format!("+{}", info.added));
                     l.push("", " ");
                     l.push(RED, &format!("-{}", info.deleted));
-                    l.right(DIM, &format!("{}/{} ", self.fsel + 1, self.files.len()), cols);
+                    // `commit ▸` (click or `c`) and the file counter, flush right
+                    let counter = format!(" {}/{} ", self.fsel + 1, self.files.len());
+                    let btn = "commit ▸";
+                    let x0 = cols.saturating_sub(ui::width(&counter) + ui::width(btn));
+                    if x0 > l.width + 1 {
+                        l.pad(x0, "");
+                        l.push(&format!("{BOLD}{GREEN}"), btn);
+                        l.push(DIM, &counter);
+                        self.commit_btn = Some((head.len(), x0, x0 + ui::width(btn)));
+                    } else {
+                        l.right(DIM, &counter, cols);
+                    }
                 }
                 head.push(l);
             }
         }
 
         // -- split the remaining rows between the two lists -------------------------
-        let status_rows = usize::from(self.status.is_some());
+        // a branch action's outcome wins over older panel messages for a while
+        let status: Option<(String, bool)> = match (&self.ctl_status, &self.ctl.status) {
+            (Some((_, at)), Some(st)) if self.tick.saturating_sub(*at) < 12 || self.ctl.busy() => Some(st.clone()),
+            _ => self.status.clone().map(|s| (s, false)),
+        };
+        let head_len = head.len();
+        let status_rows = usize::from(status.is_some());
         let body = rows.saturating_sub(head.len() + status_rows).max(1);
         let avail = body.saturating_sub(2); // separator + SESSIONS header
         let (want_f, want_s) = (self.files.len(), self.sessions.len().max(1));
@@ -749,14 +920,17 @@ impl Panel {
             lines.push(l);
             clicks.push(Some((Focus::Sessions, i)));
         }
-        if let Some(st) = &self.status {
+        if let Some((st, err)) = &status {
+            lines.truncate(rows.saturating_sub(1));
             while lines.len() + 1 < rows {
                 lines.push(Line::new());
                 clicks.push(None);
             }
-            lines.push(note(DIM, &format!(" {}", ui::truncate(st, cols.saturating_sub(2)))));
+            lines.push(note(if *err { RED } else { DIM }, &format!(" {}", ui::truncate(st, cols.saturating_sub(2)))));
         }
         self.clicks = clicks;
+        // the branch popup takes the panel's body; menus and prompts float over everything
+        self.ctl.draw(&mut lines, cols, rows, (0, head_len, cols, body), false);
         ui::print_lines(&lines, rows, cols);
     }
 }
