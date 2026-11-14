@@ -17,3 +17,7 @@ zellij-utils = "0.45.1"
 opt-level = "s"
 lto = true
 strip = true
+
+[features]
+# Trace panel open/close decisions to zellij's log (zellij.log), for debugging only.
+debug-log = []
