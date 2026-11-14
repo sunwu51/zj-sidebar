@@ -1,6 +1,6 @@
 //! Vertical tab list grouped by each tab's working directory.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
@@ -12,6 +12,8 @@ use crate::Shared;
 /// Every tab runs its own instance; folding is kept in sync through these messages.
 pub const COLLAPSED_PIPE: &str = "zjsb_collapsed";
 pub const COLLAPSED_REQUEST_PIPE: &str = "zjsb_collapsed_request";
+/// "a placeholder pane was created": its id, so every instance can clean it up
+pub const PLACEHOLDER_PIPE: &str = "zjsb_placeholder";
 const REFRESH_SECS: f64 = 2.0;
 const OPEN_DELAY_SECS: f64 = 0.05;
 const PANEL_TITLE: &str = "git · sessions";
@@ -20,6 +22,14 @@ const PLACEHOLDER_TITLE: &str = "zjsb-placeholder";
 /// Waits on stdin forever: cheap, available wherever git is, and still alive
 /// (so killable) when we close it.
 const PLACEHOLDER_CMD: &[&str] = &["git", "hash-object", "--stdin"];
+/// How long to wait for zellij to create the placeholder pane before giving up (a busy server
+/// can take seconds; counting pane updates instead gave up too early under load).
+const PLACEHOLDER_WAIT_MS: u128 = 5000;
+/// A placeholder that is still visible this long after it should have been swapped for the
+/// panel (or that nobody here owns) is a leftover empty pane, and is closed.
+const PLACEHOLDER_STALE_MS: u128 = 6000;
+/// How long a known placeholder may stay visible before any instance closes it.
+const PLACEHOLDER_GRACE_MS: u128 = 1500;
 
 enum Click {
     Group(String),
@@ -55,7 +65,15 @@ pub struct TabsView {
     /// panel open requested from a pipe, carried out on the next timer
     open_requested: Option<String>,
     /// panel waiting for its placeholder pane: (plugin url, config, updates waited)
-    pending_panel: Option<(String, BTreeMap<String, String>, u8)>,
+    /// (plugin url, config, when we asked for the placeholder, in ms)
+    pending_panel: Option<(String, BTreeMap<String, String>, u128)>,
+    /// when the swap into the panel was requested, for `placeholder`
+    placeholder_since: u128,
+    /// Every placeholder pane created for a panel (by this instance or announced by another),
+    /// with when it was last seen hidden behind its panel (or created). Titles can't identify
+    /// them: on Windows the console title (`...git.EXE`) replaces the pane name.
+    /// id -> (when last seen hidden or being swapped, created by this instance)
+    placeholders: HashMap<u32, (u128, bool)>,
     /// terminal panes of the tab before the placeholder was requested
     known_terms: Vec<u32>,
     /// placeholder pane to close once it resurfaces, and whether it was seen suppressed
@@ -133,6 +151,12 @@ impl TabsView {
                 self.synced = true;
                 true
             }
+            PLACEHOLDER_PIPE => {
+                if let Some(id) = payload.and_then(|p| p.trim().parse::<u32>().ok()) {
+                    self.placeholders.entry(id).or_insert_with(|| (now_ms(), false));
+                }
+                false
+            }
             COLLAPSED_REQUEST_PIPE if self.synced || !self.collapsed.is_empty() => {
                 // reply to the asker directly: our pane list may not include it yet
                 if let Some(id) = from {
@@ -192,18 +216,21 @@ impl TabsView {
                 if let Some(id) = self.focus_requested.take() {
                     focus_pane_with_id(id, false, false);
                 }
+                self.place_panel(shared);
                 if let Some((url, cwd)) = self.log_requested.take() {
                     Self::launch_git_log(url, cwd);
                 }
                 if *elapsed < REFRESH_SECS / 2.0 {
                     return false; // the one-shot open timer, not the refresh loop
                 }
-                let active = shared.my_tab_active();
-                if active {
+                // Re-render only if a tab moved to another folder: every render makes zellij
+                // hide and re-show the cursor for all attached clients (IME windows blink).
+                let before = shared.cwds.clone();
+                if shared.my_tab_active() {
                     self.refresh_cwds(shared);
                 }
                 set_timeout(REFRESH_SECS);
-                active
+                shared.cwds != before
             }
             Event::CwdChanged(..) => true,
             Event::Mouse(Mouse::LeftClick(line, _)) => {
@@ -222,6 +249,7 @@ impl TabsView {
                         false
                     }
                     Some(Some(Click::Panel)) => {
+                        crate::trace!(shared, "click on 'git · sessions'");
                         self.toggle_panel(shared);
                         false
                     }
@@ -257,6 +285,8 @@ impl TabsView {
     fn in_focused_tab(shared: &Shared) -> bool {
         match (get_focused_pane_info(), shared.my_tab()) {
             (Ok((tab, _)), Some(pos)) => tab == pos,
+            // our client left the session; our tab state is frozen at that moment
+            (Err(e), _) if e.contains("not found") => false,
             _ => shared.my_tab_active(),
         }
     }
@@ -335,7 +365,7 @@ impl TabsView {
             return;
         };
         let term = self.back_target(shared, pos);
-        let Some(cwd) = term.and_then(|t| shared.cwd_of(t, true)) else { return };
+        let Some(cwd) = term.and_then(|t| shared.cwd_now(t)) else { return };
         self.log_requested = Some((url, cwd.to_string_lossy().into_owned()));
         set_timeout(OPEN_DELAY_SECS);
     }
@@ -364,6 +394,7 @@ impl TabsView {
         // Every tab's instance gets the message and background instances can hold
         // stale tab state, so ask zellij where the focus is right now.
         if !Self::in_focused_tab(shared) {
+            crate::trace!(shared, "toggle: skip, not the focused tab (focused={:?}, mine={:?})", get_focused_pane_info().ok(), shared.my_tab());
             return;
         }
         // A pipe can be delivered twice; don't undo ourselves or start a second
@@ -375,6 +406,7 @@ impl TabsView {
         let opening = self.opening();
         let since = now.saturating_sub(self.last_toggle);
         if since < 400 || (opening && since < 3000) {
+            crate::trace!(shared, "toggle: skip, since_last={}ms opening={}", since, opening);
             return;
         }
         self.last_toggle = now;
@@ -382,9 +414,11 @@ impl TabsView {
             shared.my_tab(),
             shared.my_pane().and_then(|p| p.plugin_url.clone()),
         ) else {
+            crate::trace!(shared, "toggle: skip, no tab or url");
             return;
         };
         let existing = Self::find_panel(shared, pos, &url).map(|p| p.id);
+        crate::trace!(shared, "toggle: tab={} panes_seen={} existing_panel={:?}", pos, Self::describe(shared, pos), existing);
         if let Some(id) = existing {
             close_plugin_pane(id);
             return;
@@ -394,10 +428,25 @@ impl TabsView {
         set_timeout(OPEN_DELAY_SECS);
     }
 
+    /// The tab's panes as this instance sees them, for the debug trace.
+    #[allow(dead_code)]
+    fn describe(shared: &Shared, pos: usize) -> String {
+        shared.panes.panes.get(&pos).map(|ps| {
+            ps.iter()
+                .filter(|p| !(p.is_plugin && !p.is_selectable))
+                .map(|p| format!("{}{}{}{}:{}@x{}w{}", if p.is_plugin { "P" } else { "T" }, p.id,
+                    if p.is_suppressed { "(hidden)" } else { "" }, if p.is_focused { "*" } else { "" },
+                    p.title.rsplit(['\\', '/']).next().unwrap_or("").chars().take(14).collect::<String>(), p.pane_x, p.pane_columns))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }).unwrap_or_else(|| "-".into())
+    }
+
     fn open_panel(&mut self, shared: &mut Shared, url: String) {
         let Some(pos) = shared.my_tab() else { return };
         let target = shared.main_pane(pos).map(|p| p.id);
-        let cwd = target.and_then(|id| shared.cwd_of(id, true));
+        crate::trace!(shared, "open: split right of target={:?}; panes_seen={}", target, Self::describe(shared, pos));
+        let cwd = target.and_then(|id| shared.cwd_now(id));
         let mut config: BTreeMap<String, String> = shared.config.clone();
         config.insert("mode".into(), "panel".into());
         if let Some(t) = target {
@@ -434,20 +483,23 @@ impl TabsView {
             },
             BTreeMap::new(),
         );
-        self.pending_panel = Some((url, config, 0));
+        self.pending_panel = Some((url, config, now_ms()));
     }
 
     fn place_panel(&mut self, shared: &Shared) {
         let Some(pos) = shared.my_tab() else { return };
         let panes = shared.panes.panes.get(&pos);
+        let now = now_ms();
+        // The new pane is ours when it carries the placeholder's title; any other new terminal
+        // is only a fallback, so a shell the user opens meanwhile is not swapped for the panel.
         let fresh = panes.and_then(|ps| {
-            ps.iter()
-                .find(|p| !p.is_plugin && !self.known_terms.contains(&p.id))
-                .cloned()
+            let new: Vec<&PaneInfo> = ps.iter().filter(|p| !p.is_plugin && !self.known_terms.contains(&p.id)).collect();
+            new.iter().find(|p| p.title == PLACEHOLDER_TITLE).or(new.first()).map(|p| (*p).clone())
         });
-        if let Some((url, config, waited)) = self.pending_panel.take() {
+        if let Some((url, config, started)) = self.pending_panel.take() {
             match fresh {
                 Some(p) if !p.is_suppressed => {
+                    crate::trace!(shared, "swap: placeholder T{} ('{}') -> panel; panes_seen={}", p.id, p.title, Self::describe(shared, pos));
                     // `target_pane` makes the config unique, so this always launches a new panel
                     let mut config = config;
                     // the panel must never mistake this throwaway pane for the user's shell
@@ -461,9 +513,13 @@ impl TabsView {
                             .new_plugin_instance_should_be_focused(),
                     );
                     self.placeholder = Some((p.id, false));
+                    self.placeholder_since = now;
+                    self.placeholders.insert(p.id, (now, true));
+                    Self::broadcast(shared, PLACEHOLDER_PIPE, p.id.to_string());
                 }
-                _ if waited < 20 => self.pending_panel = Some((url, config, waited + 1)),
-                _ => {}
+                _ if now.saturating_sub(started) < PLACEHOLDER_WAIT_MS => self.pending_panel = Some((url, config, started)),
+                // gave up: a placeholder that shows up late is swept below
+                other => crate::trace!(shared, "swap: gave up waiting for a placeholder (fresh={:?}); panes_seen={}", other.map(|p| p.id), Self::describe(shared, pos)),
             }
         }
         // The replaced pane is only suppressed and comes back when the panel closes
@@ -471,9 +527,47 @@ impl TabsView {
         if let Some((id, seen_suppressed)) = self.placeholder {
             match panes.and_then(|ps| ps.iter().find(|p| !p.is_plugin && p.id == id)) {
                 Some(p) if p.is_suppressed => self.placeholder = Some((id, true)),
-                Some(_) if seen_suppressed => close_terminal_pane(id),
+                Some(_) if seen_suppressed => {
+                    crate::trace!(shared, "cleanup: panel closed, closing its placeholder T{}", id);
+                    close_terminal_pane(id)
+                }
+                // the swap never happened: don't leave an empty pane next to the shell
+                Some(_) if now.saturating_sub(self.placeholder_since) > PLACEHOLDER_STALE_MS => {
+                    crate::trace!(shared, "cleanup: swap never happened, closing placeholder T{}", id);
+                    close_terminal_pane(id);
+                    self.placeholder = None;
+                }
                 Some(_) => {}
                 None => self.placeholder = None,
+            }
+        }
+        // Leftovers: a placeholder that is visible although no panel is about to replace it
+        // (a second open while one was already in flight, a lost swap, a closed panel). Only
+        // the one this instance is still swapping is exempt; anything visible for a while goes.
+        let swapping = match self.placeholder {
+            Some((id, false)) if now.saturating_sub(self.placeholder_since) <= PLACEHOLDER_STALE_MS => Some(id),
+            _ => None,
+        };
+        let mut gone = Vec::new();
+        for (id, (seen, own)) in self.placeholders.iter_mut() {
+            // another client's instance may still be swapping one it announced: wait longer
+            let grace = if *own { PLACEHOLDER_GRACE_MS } else { PLACEHOLDER_STALE_MS };
+            match panes.and_then(|ps| ps.iter().find(|p| !p.is_plugin && p.id == *id)) {
+                // not in this tab (or already closed)
+                None => gone.push(*id),
+                Some(p) if p.is_suppressed || Some(*id) == swapping => *seen = now,
+                // the panel closing brings it back briefly before it is closed above
+                Some(_) if now.saturating_sub(*seen) > grace => {
+                    crate::trace!(shared, "cleanup: leftover placeholder T{} visible for {}ms (own={}), closing", id, now.saturating_sub(*seen), own);
+                    close_terminal_pane(*id);
+                    gone.push(*id);
+                }
+                Some(_) => {}
+            }
+        }
+        if panes.is_some() {
+            for id in gone {
+                self.placeholders.remove(&id);
             }
         }
     }

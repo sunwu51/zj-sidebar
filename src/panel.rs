@@ -14,6 +14,8 @@ use crate::ui::{self, Line, BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, YELLOW};
 use crate::Shared;
 
 const TICK_SECS: f64 = 1.0;
+/// how many ticks a git action's outcome stays in the status line
+const STATUS_TICKS: u64 = 12;
 const DEFAULT_WIDTH: usize = 44;
 
 #[derive(Default)]
@@ -180,6 +182,21 @@ impl Panel {
         }
     }
 
+    /// Fingerprint of what the session list shows: sessions, which run in a pane, the
+    /// status line. Compared before/after a refresh to skip renders that change nothing.
+    fn shown_sessions(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in &self.sessions {
+            (&s.id, &s.title, s.updated).hash(&mut h);
+        }
+        let mut running: Vec<_> = self.running.iter().collect();
+        running.sort();
+        running.hash(&mut h);
+        self.status.hash(&mut h);
+        h.finish()
+    }
+
     fn merge_sessions(&mut self) {
         let mut all: Vec<Session> = self.claude.iter().chain(&self.codex).cloned().collect();
         all.sort_by(|a, b| b.updated.cmp(&a.updated));
@@ -271,7 +288,7 @@ impl Panel {
 
     fn refresh_cwd(&mut self, shared: &mut Shared) -> bool {
         let Some(t) = self.target else { return false };
-        let Some(cwd) = shared.cwd_of(t, true) else { return false };
+        let Some(cwd) = shared.cwd_now(t) else { return false };
         let cwd = cwd.to_string_lossy().into_owned();
         if self.cwd.as_deref() == Some(cwd.as_str()) {
             return false;
@@ -603,6 +620,7 @@ impl Panel {
             }
             Event::Timer(_) => {
                 self.tick += 1;
+                let before = self.shown_sessions();
                 let changed = self.tick % 2 == 0 && self.refresh_cwd(shared);
                 if !changed {
                     if self.tick % 3 == 0 {
@@ -618,7 +636,16 @@ impl Panel {
                     }
                 }
                 set_timeout(TICK_SECS);
-                true
+                // Re-render only when something shown changed. Every render makes zellij hide
+                // and re-show the cursor for all attached clients, which made IME candidate
+                // windows blink once a second; every client also runs its own copy of this panel.
+                // Ages ("6m") change at most once a minute; a git action's message expires
+                // `STATUS_TICKS` after it appeared.
+                let status_expired = self
+                    .ctl_status
+                    .as_ref()
+                    .is_some_and(|(_, at)| self.tick.saturating_sub(*at) == STATUS_TICKS);
+                changed || status_expired || self.tick % 30 == 0 || self.shown_sessions() != before
             }
             Event::RunCommandResult(code, stdout, stderr, ctx) => {
                 if ctx.get("cwd") != self.cwd.as_ref() {
@@ -626,6 +653,7 @@ impl Panel {
                 }
                 let out = String::from_utf8_lossy(stdout).into_owned();
                 let ok = *code == Some(0);
+                let before = self.shown_sessions();
                 if ctx.contains_key("running") {
                     if ok {
                         self.on_running(&out);
@@ -642,8 +670,9 @@ impl Panel {
                                 }
                             }
                         }
+                        return true; // the user opened a session
                     }
-                    return true;
+                    return self.shown_sessions() != before;
                 }
                 if ctx.contains_key("codex") {
                     if ok {
@@ -653,14 +682,31 @@ impl Panel {
                         let err = String::from_utf8_lossy(stderr);
                         self.status = Some(format!("codex: {}", err.trim()));
                     }
-                    return true;
+                    return self.shown_sessions() != before;
                 }
+                // the periodic `git status` mostly returns what it returned last time
                 match ctx.get("git").map(String::as_str) {
                     Some("status") => {
-                        self.git.status = Some(if ok { Ok(out) } else { Err(String::from_utf8_lossy(stderr).into_owned()) })
+                        let new = Some(if ok { Ok(out) } else { Err(String::from_utf8_lossy(stderr).into_owned()) });
+                        if self.git.status == new {
+                            return false;
+                        }
+                        self.git.status = new;
                     }
-                    Some("unstaged") => self.git.unstaged = ok.then_some(out),
-                    Some("staged") => self.git.staged = ok.then_some(out),
+                    Some("unstaged") => {
+                        let new = ok.then_some(out);
+                        if self.git.unstaged == new {
+                            return false;
+                        }
+                        self.git.unstaged = new;
+                    }
+                    Some("staged") => {
+                        let new = ok.then_some(out);
+                        if self.git.staged == new {
+                            return false;
+                        }
+                        self.git.staged = new;
+                    }
                     Some("root") => {
                         self.root = ok.then(|| out.trim().to_string()).filter(|r| !r.is_empty());
                         return false;
@@ -812,7 +858,7 @@ impl Panel {
         // -- split the remaining rows between the two lists -------------------------
         // a branch action's outcome wins over older panel messages for a while
         let status: Option<(String, bool)> = match (&self.ctl_status, &self.ctl.status) {
-            (Some((_, at)), Some(st)) if self.tick.saturating_sub(*at) < 12 || self.ctl.busy() => Some(st.clone()),
+            (Some((_, at)), Some(st)) if self.tick.saturating_sub(*at) < STATUS_TICKS || self.ctl.busy() => Some(st.clone()),
             _ => self.status.clone().map(|s| (s, false)),
         };
         let head_len = head.len();
