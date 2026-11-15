@@ -2574,6 +2574,7 @@ name = "zj-sidebar"
 version = "0.3.0"
 dependencies = [
  "serde_json",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
  "zellij-tile",
  "zellij-utils",

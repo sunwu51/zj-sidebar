@@ -1,7 +1,8 @@
 //! Small text/ANSI helpers shared by both modes.
 //! Colors use the 16-color ANSI palette so they follow the terminal theme.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
@@ -28,12 +29,12 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
     let mut out = String::new();
     let mut w = 0;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
+    for c in s.graphemes(true) {
+        let cw = self::width(c);
         if w + cw > max - 1 {
             break;
         }
-        out.push(c);
+        out.push_str(c);
         w += cw;
     }
     out.push('…');
@@ -45,8 +46,8 @@ pub fn truncate(s: &str, max: usize) -> String {
 pub fn slice_cols(s: &str, skip: usize, width: usize) -> String {
     let mut out = String::new();
     let (mut col, mut used) = (0usize, 0usize);
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
+    for c in s.graphemes(true) {
+        let cw = self::width(c);
         let start = col;
         col += cw;
         if col <= skip {
@@ -59,7 +60,7 @@ pub fn slice_cols(s: &str, skip: usize, width: usize) -> String {
             out.push_str(&" ".repeat(col - skip));
             used += col - skip;
         } else {
-            out.push(c);
+            out.push_str(c);
             used += cw;
         }
     }
@@ -74,10 +75,10 @@ pub fn truncate_left(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let mut tail: Vec<char> = Vec::new();
+    let mut tail = Vec::new();
     let mut w = 0;
-    for c in s.chars().rev() {
-        let cw = c.width().unwrap_or(0);
+    for c in s.graphemes(true).rev() {
+        let cw = width(c);
         if w + cw > max - 1 {
             break;
         }
@@ -86,8 +87,28 @@ pub fn truncate_left(s: &str, max: usize) -> String {
     }
     tail.reverse();
     let mut out = String::from("…");
-    out.extend(tail);
+    for grapheme in tail {
+        out.push_str(grapheme);
+    }
     out
+}
+
+/// Zellij 0.45's plugin screen drops VS16 without widening its preceding symbol.
+/// Keep the layout's grapheme width using explicit blank cells instead. Restrict
+/// this compatibility conversion to simple emoji-presentation sequences; leave
+/// flags, ZWJ sequences, combining marks and default-wide emoji untouched.
+fn push_terminal_text(out: &mut String, text: &str) {
+    for grapheme in text.graphemes(true) {
+        if grapheme.ends_with('\u{fe0f}') {
+            let base = &grapheme[..grapheme.len() - '\u{fe0f}'.len_utf8()];
+            if base.chars().count() == 1 && width(base) == 1 && width(grapheme) == 2 {
+                out.push_str(base);
+                out.push(' ');
+                continue;
+            }
+        }
+        out.push_str(grapheme);
+    }
 }
 
 /// One rendered row: styled segments plus their visible (unstyled) width. Keeping the
@@ -177,10 +198,10 @@ impl Line {
         let mut out = String::new();
         for (st, t) in &self.segs {
             if st.is_empty() {
-                out.push_str(t);
+                push_terminal_text(&mut out, t);
             } else {
                 out.push_str(st);
-                out.push_str(t);
+                push_terminal_text(&mut out, t);
                 out.push_str(RESET);
             }
         }
@@ -344,4 +365,51 @@ pub fn shell_command(shell: &str, cmd: &str) -> (String, Vec<String>) {
         _ => vec!["-ic".into(), format!("{cmd}; exec '{}'", shell.replace('\'', "'\\''"))],
     };
     (shell.to_string(), args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emoji_presentation_renders_explicit_cells_without_changing_layout_width() {
+        for (source, rendered) in [("♻️ commit", "♻  commit"), ("❤️ fix", "❤  fix"), ("⚙️ settings", "⚙  settings")] {
+            let mut line = Line::new();
+            line.push("", source);
+            assert_eq!(line.render(), rendered);
+            assert_eq!(width(&line.render()), line.width);
+        }
+        for source in ["♻ plain", "✨ commit", "🐛 fix", "e\u{301}", "中文", "👩‍💻", "🇨🇳"] {
+            assert_eq!(line("", source).render(), source);
+        }
+    }
+
+    #[test]
+    fn slicing_and_truncation_do_not_split_emoji_clusters() {
+        assert_eq!(slice_cols("A♻️B", 0, 3), "A♻️");
+        assert_eq!(slice_cols("A♻️B", 2, 2), " B");
+        assert_eq!(slice_cols("A♻️B", 1, 1), "");
+        assert_eq!(truncate("♻️abc", 3), "♻️…");
+        assert_eq!(truncate_left("abc♻️", 3), "…♻️");
+        assert_eq!(slice_cols("Ae\u{301}B", 1, 1), "e\u{301}");
+    }
+
+    #[test]
+    fn git_log_columns_stay_aligned_through_fit_slice_and_overlay() {
+        for cols in [70, 100, 140] {
+            for subject in ["♻️ Remove standalone MCP exec and job tools", "✨ Open Side Shell sessions", "🐛 Fix widths"] {
+                let mut row = Line::new();
+                row.push("", subject).pad(cols - 25, "").push("", "author").pad(cols - 12, "").push("", "2026-11-15 │");
+                let row = row.fit(cols);
+                assert_eq!(width(&row.render()), cols);
+                assert_eq!(row.slice(cols - 25, 6).render(), "author");
+                assert_eq!(row.slice(cols - 1, 1).render(), "│");
+                let mut overlaid = row.clone();
+                overlaid.overlay(cols - 25, &line("", "AUTHOR"));
+                assert_eq!(width(&overlaid.render()), cols);
+                assert_eq!(overlaid.slice(cols - 25, 6).render(), "AUTHOR");
+                assert_eq!(overlaid.slice(cols - 1, 1).render(), "│");
+            }
+        }
+    }
 }
