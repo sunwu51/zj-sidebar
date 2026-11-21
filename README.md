@@ -6,18 +6,30 @@ A [zellij](https://zellij.dev) plugin for people who run Claude Code / Codex in 
 
 - **Vertical tab list** on the left, **grouped by working directory**. Click a group to fold/unfold it, click a tab to switch.
 - **Git + sessions panel** on the right (toggle with a click or a key):
-  - top: directory, branch (ahead/behind), changed files with `+added -deleted`; `Enter` on a file opens its **side-by-side diff** in a floating overlay;
+  - top: directory, branch (ahead/behind), changed files with `+added -deleted`; `Enter` on a file opens its **side-by-side diff** in a floating overlay — syntax-highlighted, the whole file with the unchanged stretches folded (unfold 50 lines at a time or all of it), searchable, and selectable with the mouse (copied to the clipboard);
   - **commit** (`c`, or `commit ▸` on the changes line): IDEA-style commit dialog with the changed files as checkboxes (all checked), "amend last commit" (pre-fills the last message) and "push after commit", and a multi-line message (`Alt+Enter` = new line); only the checked files are committed, new and deleted ones included;
   - click the branch (or `b`) for an **IntelliJ IDEA-style branch popup**: type to filter local/remote branches (remotes are fetched in the background when it opens), and per branch: checkout (a remote branch becomes a local tracking branch), new branch from it, checkout & rebase, rebase/merge into the current one, push, rename, delete; plus update (pull), push, fetch, stash/unstash, and continue/abort a merge or rebase in progress;
   - bottom: the **Claude Code and Codex sessions of that directory**, newest first. `↑/↓` + `Enter` (or click) resumes one:
     - already open in some pane (marked `●`) → jumps to it;
     - current shell idle → types `claude --resume <id>` / `codex resume <id>` there;
     - otherwise → opens a new tab in the same directory.
-- **Git Log window** (`log ▸` on the branch line, `l` in the panel, or `Alt+Shift+g` from the shell): the commit graph of all branches with hash, refs, subject, author and date (connector rows keep each lane's line continuous); the selected commit's changed files and full message beside it; `Enter` on a file shows the commit's diff. `Enter` (or `m`, or right-click where the terminal passes it on) on a commit opens IDEA's actions — copy hash, checkout revision, new branch/tag, cherry-pick, revert, reset (soft/mixed/hard/keep), undo commit, edit message, interactive rebase from here, push up to here — or a file (`m`) for show diff, compare with local, history, get from revision. Everything that changes your files, history or the remote (stash, pull, push, merge, rebase, cherry-pick, revert, reset, undo, delete…) asks first; when a git command fails (a rejected push, an unreachable remote…) its full message is shown until you dismiss it.
+- **Git Log window** (`log ▸` on the branch line, `l` in the panel, or `Alt+Shift+g` from the shell): the commit graph of all branches with hash, refs, subject, author and date (connector rows keep each lane's line continuous); the selected commit's changed files and full message beside it; `Enter` on a file shows the commit's diff. The **search box** (`/`) takes fields — `branch:master & author:frank & file:Foo.java & msg:'text'` — or plain text, which searches the commit messages. `Enter` (or `m`, or right-click where the terminal passes it on) on a commit opens IDEA's actions — copy hash, checkout revision, new branch/tag, cherry-pick, revert, reset (soft/mixed/hard/keep), undo commit, edit message, interactive rebase from here, push up to here — or a file (`m`) for show diff, compare with local, history, get from revision. Everything that changes your files, history or the remote (stash, pull, push, merge, rebase, cherry-pick, revert, reset, undo, delete…) asks first; when a git command fails (a rejected push, an unreachable remote…) its full message is shown until you dismiss it.
 - Works on **Linux, macOS and Windows** (zellij ≥ 0.45).
 
 <!-- screenshot -->
 ![screenshot](docs/screenshot.png)
+
+The Git Log window, and searching it with fields (`author:carol & file:search.ts`):
+
+![git log](docs/git-log.png)
+
+![git log search](docs/git-log-search.png)
+
+The diff overlay (syntax highlighting; the unchanged stretches are folded, `[↓ 14] [↑ 14] [all]` unfold them):
+
+![diff](docs/diff.png)
+
+*(The screenshots show a made-up demo repository.)*
 
 ## Install
 
@@ -86,7 +98,7 @@ On macOS, `Alt` needs "Option as Alt/Meta" in your terminal (kitty: `macos_optio
 | Commit dialog | type the message (`Alt+Enter` or a trailing `\` then `Enter` = new line, `Enter` commits), `Tab` switches to the file/option list: `↑`/`↓` move, `Space` (or click) toggles a file / amend / push, `a` all files; `Ctrl+U` clears the message; `Esc` closes and keeps the message as a draft; if git refuses (e.g. a hook fails) the dialog stays open with the error |
 | Branch popup | type to filter, `↑`/`↓` move, `Enter`/`→` (or click) opens the branch's actions (each has a letter key, e.g. `c` checkout), `Backspace` edits the filter, `Esc` clears it / closes; in the panel it takes the panel's body |
 | Git Log window | `j`/`k` move, `Enter`/`m` = the commit's actions menu (its first item, `f`, shows the changed files), `l`/`Tab`/`→` into the files, `Enter` on a file = diff, `m` = file actions, `h`/`←` back; `c` commit, `b` branches, `/` search (`branch:master & author:frank & file:Foo.java & msg:'text' & hash:ab12`, all terms must match; `file:` matches that name in any directory, `branch:` takes a branch/tag/range; plain text = `msg:`; `Enter` applies, `Esc` clears), `a` all branches ↔ current branch, `y` copy hash/path, `f` fetch, `r` reload, `q`/`Esc` steps back (filter → file history → branch scope) and closes; double-click a commit opens its files |
-| Diff overlay | `j`/`k` scroll, `space`/`b` page, `n`/`p` (or `}`/`{`) next/previous diff point — the header shows `diff 2/5` with clickable `[▲ prev] [▼ next]`; the whole file is shown, opened on the first change, `]`/`[` (or `Tab`/`Shift+Tab`) next/previous changed file, `h`/`l` scroll sideways, `g`/`G` top/end, `/` search the file (both sides; `Enter` jumps to the next match, `n`/`N` next/previous, `Esc` clears), `C` folds the unchanged stretches (3 lines of context) and `u`/`d`/`a` unfold the next collapsed block up/down by 50 lines / completely (or click `[↑ 50]` `[↓ 50]` `[all]`), `E` unfolds everything, `q`/`Esc` close |
+| Diff overlay | `j`/`k` scroll, `space`/`b` page, `n`/`p` (or `}`/`{`) next/previous diff point — the header shows `diff 2/5` with clickable `[▲ prev] [▼ next]`; the whole file is shown, opened on the first change, `]`/`[` (or `Tab`/`Shift+Tab`) next/previous changed file, `h`/`l` scroll sideways, `g`/`G` top/end, drag with the mouse to select text on one side (copied to the clipboard on release, or `y`; `Esc` clears) — zellij owns the mouse, so the terminal's own selection doesn't work in this window, `/` search the file (both sides; `Enter` jumps to the next match, `n`/`N` next/previous, `Esc` clears), `C` folds the unchanged stretches (3 lines of context) and `u`/`d`/`a` unfold the next collapsed block up/down by 50 lines / completely (or click `[↑ 50]` `[↓ 50]` `[all]`), `E` unfolds everything, `q`/`Esc` close |
 | `●` next to `CC`/`CX` | that session is currently running in some pane of this zellij session |
 
 Tabs without a custom name are labelled with their shell/program; groups are keyed by the directory of the tab's focused pane.
@@ -129,17 +141,19 @@ More optional tweaks (theme, default shell, `Ctrl+X Ctrl+E` command editing, key
 
 ## How it works
 
-- One wasm plugin, two modes: `tabs` (the sidebar, one instance per tab, folding state synced by plugin messages) and `panel` (opened next to the focused pane).
+- One wasm plugin, four modes: `tabs` (the sidebar, one instance per tab, folding state synced by plugin messages), `panel` (opened next to the focused pane), `diff` and `log` (the floating overlays below).
 - Claude sessions are read from `~/.claude/projects/<dir>/*.jsonl` (title: custom/AI title, else last prompt; time: last message, not the file's mtime).
-- Codex keeps its thread list in `~/.codex/state_<n>.sqlite`, which a wasm plugin can't read, so a small native helper (`helper/`) lists the threads `codex resume` would show for the directory (not archived, `cli`/`vscode` sources).
+- Codex keeps its thread list in `~/.codex/state_<n>.sqlite`, which a wasm plugin can't read, so a small native helper (`helper/`) lists the threads `codex resume` would show for the directory (not archived, `cli`/`vscode` sources). The same helper does what the 16 MiB-limited wasm sandbox can't: the syntax highlighting of the diff overlay (see below).
 - "Running" detection: the helper walks each pane shell's child processes. Claude: `~/.claude/sessions/<pid>.json`; Codex: a `codex resume <id>` command line (a Codex started as plain `codex` isn't detected).
 - "Idle" = the pane's foreground process is a shell.
-- The diff overlay is a third mode (`diff`) of the same plugin, opened as a floating pane; it runs `git diff HEAD -U99999999 -- <file>` (the whole file as context, folded to 3 lines around each change until you unfold it) (untracked files: `--no-index` against `/dev/null`; a commit: `git diff <parent> <commit>`) and aligns removed/added lines into two columns. Code is syntax-highlighted with [syntect](https://github.com/trishume/syntect) (pure-Rust regex engine) and the syntaxes bundled by [two-face](https://github.com/CosmicHorrorDev/two-face) (bat's set: Java, Kotlin, TypeScript/TSX, JavaScript, Python, Rust, Go, C/C++/C#, Swift, Ruby, PHP, Scala, Lua, SQL, shell, TOML/YAML/JSON, HTML/CSS/Vue, Markdown, Makefile, Dockerfile, … — chosen by file extension), painted with the terminal's own 16 colors; files over 8000 lines per side are left plain.
+- The diff overlay is a third mode (`diff`) of the same plugin, opened as a floating pane; it runs `git diff HEAD -U99999999 -- <file>` (the whole file as context, folded to 3 lines around each change until you unfold it) (untracked files: `--no-index` against `/dev/null`; a commit: `git diff <parent> <commit>`) and aligns removed/added lines into two columns. Code is syntax-highlighted by the native helper (`zjsb-helper highlight`, which reads both versions of the file with git), with [syntect](https://github.com/trishume/syntect) and the syntaxes bundled by [two-face](https://github.com/CosmicHorrorDev/two-face) (bat's set: Java, Kotlin, TypeScript/TSX, JavaScript, Python, Rust, Go, C/C++/C#, Swift, Ruby, PHP, Scala, Lua, SQL, shell, TOML/YAML/JSON, HTML/CSS/Vue, Markdown, Makefile, Dockerfile, … — chosen by file extension), painted with the terminal's own 16 colors. This is done outside the plugin because zellij stops a wasm plugin that uses more than 16 MiB, which compiling e.g. TypeScript's syntax needs five times over. Only the first 8000 lines per version are highlighted; if either version is over 2 MB (or the helper can't be run) the overlay shows a plain `-U3` diff without unfolding or colors.
 - The Git Log window is a fourth mode (`log`): `git log --date-order` over all branches, laid out into lanes by the plugin itself (one row per commit). Git actions run one git command at a time with `GIT_TERMINAL_PROMPT=0` and `GIT_EDITOR=true`, so nothing waits for input; a checkout blocked by local changes offers IDEA's *smart checkout* (stash → checkout → unstash) or a force checkout, and deleting an unmerged branch asks before `-D`. Interactive rebase opens in a floating terminal pane.
 
 ## Troubleshooting
 
 - **Sidebar shows a permission prompt / nothing happens** – click it, press `y`.
+- **A diff has no colors / no unfolding, and says `large file: changes only`** – either version of the file is over 2 MB, or the helper isn't found or can't run (see the next item); the plain `-U3` diff is the fallback.
+- **"Clipboard copy failed" or nothing is copied from the diff overlay** – the plugin copies through zellij, which asks your terminal with an OSC 52 sequence; the terminal has to allow it (a browser terminal such as xterm.js needs a handler for it).
 - **No Codex sessions, no `●`** – the helper isn't where the plugin looks (see the table above) or isn't executable; run `zjsb-helper codex "$PWD"` by hand, or set `helper` in an alias.
 - **Alt+d does nothing on macOS** – enable Option-as-Alt (see above), or click the button.
 - **Wrong directory grouping on Windows** – add the profile hook above.
@@ -152,7 +166,8 @@ cargo build --release                      # plugin -> target/wasm32-wasip1/rele
 cargo build --release --manifest-path helper/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')"
 bash scripts/helper-smoke-test.sh helper/target/<host>/release/zjsb-helper   # Linux/macOS
 rustc --test --edition 2024 src/diffparse.rs -o /tmp/dp && /tmp/dp               # diff parser unit tests
-rustc --test --edition 2024 src/gitlog.rs -o /tmp/gl && /tmp/gl                   # log/branch parsing and graph layout tests
+rustc --test --edition 2024 src/gitlog.rs -o /tmp/gl && /tmp/gl                   # log/branch parsing, search query and graph layout tests
+cargo test --release --target "$(rustc -vV | sed -n 's/^host: //p')"      # all plugin unit tests on the host
 ```
 
 Releases: push a tag `vX.Y.Z`; the workflow builds the wasm plugin and the helper for Windows x64, Linux x64/arm64 (musl, static) and macOS x64/arm64, and publishes them with `SHA256SUMS`.
