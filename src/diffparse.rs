@@ -208,8 +208,10 @@ pub enum Item {
 }
 
 pub fn folds(p: &Parsed, ctx: usize) -> Folds {
+    // one hunk (the whole file) needs no header; several (a context-limited diff) do
+    let headers = p.hunks.len() > 1;
     let order: Vec<usize> = (0..p.rows.len())
-        .filter(|&i| !matches!(&p.rows[i], Row::Meta(t) if t.starts_with("@@ ")))
+        .filter(|&i| headers || !matches!(&p.rows[i], Row::Meta(t) if t.starts_with("@@ ")))
         .collect();
     let n = order.len();
     let changed: Vec<bool> = order.iter().map(|&i| p.rows[i].changed()).collect();
@@ -441,5 +443,13 @@ index 111..222 100644
         let p = parse("@@ -1,2 +1,2 @@\n-hello\n+world\n tail\n");
         assert_eq!(search(&p, "WORLD"), vec![1]);
         assert_eq!(search(&p, "tail"), vec![2]);
+    }
+
+    #[test]
+    fn context_limited_diffs_keep_their_hunk_headers() {
+        let multi = folds(&parse(SAMPLE), 3);
+        assert_eq!(multi.order.len(), 9); // 2 headers + 7 rows
+        let single = folds(&parse("@@ -1,2 +1,2 @@\n-a\n+b\n c\n"), 3);
+        assert_eq!(single.order.len(), 2); // the lone header is not shown
     }
 }

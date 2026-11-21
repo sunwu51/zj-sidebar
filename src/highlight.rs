@@ -1,14 +1,7 @@
-//! Syntax highlighting for the diff overlay: syntect parses each side of the file with the
-//! Sublime syntaxes bundled by `two-face` (bat's set: Java, Kotlin, TypeScript, …), and the
-//! scopes are boiled down to a handful of token kinds that the view paints with the
-//! terminal's own 16 colors (no theme, so it follows the user's palette).
-
-use std::sync::OnceLock;
-
-use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
-
-/// Files longer than this (per side) are shown without highlighting.
-pub const MAX_LINES: usize = 8000;
+//! Syntax highlighting for the diff overlay. The coloring itself is done by the native
+//! `zjsb-helper highlight` (a wasm plugin may not use more than 16 MiB, far too little to
+//! compile the regexes of a syntax like TypeScript); this reads its answer. The kinds are
+//! painted with the terminal's own 16 colors, so they follow the user's palette.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
@@ -29,151 +22,69 @@ pub struct Span {
     pub tok: Tok,
 }
 
-struct Engine {
-    set: SyntaxSet,
-    /// innermost scope that matches a rule decides; `Plain` stops the search (operators)
-    rules: Vec<(Scope, Tok)>,
-}
+/// Lines beyond this are ignored (the helper never sends more than it highlights).
+const MAX_LINE_NO: usize = 100_000;
 
-fn engine() -> &'static Engine {
-    static E: OnceLock<Engine> = OnceLock::new();
-    E.get_or_init(|| {
-        use Tok::*;
-        let table: &[(&str, Tok)] = &[
-            ("comment", Comment),
-            ("string", String),
-            ("constant.numeric", Number),
-            ("constant.language", Number),
-            ("constant.character", String),
-            ("constant", Number),
-            ("keyword.operator", Plain),
-            ("keyword", Keyword),
-            ("storage", Keyword),
-            ("variable.language", Keyword),
-            ("entity.name.tag", Keyword),
-            ("entity.name.function", Function),
-            ("support.function", Function),
-            ("variable.function", Function),
-            ("entity.name.type", Type),
-            ("entity.name.class", Type),
-            ("entity.name.struct", Type),
-            ("entity.name.enum", Type),
-            ("entity.name.trait", Type),
-            ("entity.name.interface", Type),
-            ("entity.other.inherited-class", Type),
-            ("support.type", Type),
-            ("support.class", Type),
-        ];
-        Engine {
-            set: two_face::syntax::extra_newlines(),
-            rules: table.iter().filter_map(|(s, t)| Scope::new(s).ok().map(|s| (s, *t))).collect(),
-        }
+fn tok(code: &str) -> Option<Tok> {
+    Some(match code {
+        "k" => Tok::Keyword,
+        "s" => Tok::String,
+        "c" => Tok::Comment,
+        "n" => Tok::Number,
+        "t" => Tok::Type,
+        "f" => Tok::Function,
+        _ => return None,
     })
 }
 
-impl Engine {
-    fn tok(&self, stack: &ScopeStack) -> Tok {
-        for scope in stack.as_slice().iter().rev() {
-            if let Some((_, t)) = self.rules.iter().find(|(r, _)| r.is_prefix_of(*scope)) {
-                return *t;
-            }
-        }
-        Tok::Plain
-    }
-}
-
-/// The syntax for a file, by extension and then by whole name (`Makefile`, `Dockerfile`).
-pub fn syntax_for(path: &str) -> Option<&'static SyntaxReference> {
-    let e = engine();
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let ext = name.rsplit_once('.').map(|(_, x)| x);
-    ext.and_then(|x| e.set.find_syntax_by_extension(x))
-        .or_else(|| e.set.find_syntax_by_extension(name))
-        .or_else(|| ext.and_then(|x| e.set.find_syntax_by_extension(&x.to_ascii_lowercase())))
-}
-
-/// Highlight `lines` (consecutive lines of one file); one list of spans per line.
-pub fn highlight<'a>(syntax: &SyntaxReference, lines: impl Iterator<Item = &'a str>) -> Vec<Vec<Span>> {
-    let e = engine();
-    let mut state = ParseState::new(syntax);
-    let mut stack = ScopeStack::new();
-    let mut out = Vec::new();
-    for text in lines {
-        let line = format!("{text}\n");
-        let mut spans = Vec::new();
-        let Ok(ops) = state.parse_line(&line, &e.set) else {
-            out.push(spans);
-            continue;
+/// Parse the helper's lines (`L|R <TAB> line <TAB> from-to:kind ...`) into the spans of
+/// every line (index = line number - 1) of the old (0) and the new (1) version.
+pub fn parse(out: &str) -> [Vec<Vec<Span>>; 2] {
+    let mut sides: [Vec<Vec<Span>>; 2] = Default::default();
+    for l in out.lines() {
+        let mut f = l.splitn(3, '\t');
+        let (Some(side), Some(no), Some(spans)) = (f.next(), f.next(), f.next()) else { continue };
+        let side = match side {
+            "L" => 0,
+            "R" => 1,
+            _ => continue,
         };
-        let mut at = 0;
-        let push = |spans: &mut Vec<Span>, from: usize, to: usize, tok: Tok| {
-            let to = to.min(text.len());
-            if tok == Tok::Plain || from >= to {
-                return;
-            }
-            match spans.last_mut() {
-                Some(l) if l.end == from && l.tok == tok => l.end = to,
-                _ => spans.push(Span { start: from, end: to, tok }),
-            }
-        };
-        for (pos, op) in ops {
-            push(&mut spans, at, pos, e.tok(&stack));
-            at = pos;
-            if stack.apply(&op).is_err() {
-                break;
-            }
+        let Some(no) = no.parse::<usize>().ok().filter(|n| (1..=MAX_LINE_NO).contains(n)) else { continue };
+        let spans: Vec<Span> = spans
+            .split(' ')
+            .filter_map(|s| {
+                let (range, kind) = s.split_once(':')?;
+                let (a, b) = range.split_once('-')?;
+                Some(Span { start: a.parse().ok()?, end: b.parse().ok()?, tok: tok(kind)? })
+            })
+            .collect();
+        let v = &mut sides[side];
+        if v.len() < no {
+            v.resize(no, Vec::new());
         }
-        push(&mut spans, at, text.len(), e.tok(&stack));
-        out.push(spans);
+        v[no - 1] = spans;
     }
-    out
+    sides
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn toks(path: &str, src: &str) -> Vec<Vec<(String, Tok)>> {
-        let syntax = syntax_for(path).unwrap_or_else(|| panic!("no syntax for {path}"));
-        let lines: Vec<&str> = src.lines().collect();
-        highlight(syntax, lines.iter().copied())
-            .into_iter()
-            .zip(&lines)
-            .map(|(spans, l)| spans.iter().map(|s| (l[s.start..s.end].to_string(), s.tok)).collect())
-            .collect()
-    }
-
-    fn has(line: &[(String, Tok)], text: &str, tok: Tok) -> bool {
-        line.iter().any(|(t, k)| t.contains(text) && *k == tok)
+    #[test]
+    fn parses_helper_output() {
+        let h = parse("L\t2\t0-6:k 7-9:s\nR\t1\t3-4:c\nR\t3\t0-1:n\nbogus\nR\tx\t0-1:k\nR\t0\t0-1:k\n");
+        assert_eq!(h[0].len(), 2);
+        assert!(h[0][0].is_empty());
+        assert_eq!(h[0][1], vec![Span { start: 0, end: 6, tok: Tok::Keyword }, Span { start: 7, end: 9, tok: Tok::String }]);
+        assert_eq!(h[1].len(), 3);
+        assert_eq!(h[1][0][0].tok, Tok::Comment);
+        assert!(h[1][1].is_empty());
+        assert_eq!(h[1][2][0].tok, Tok::Number);
     }
 
     #[test]
-    fn finds_syntaxes_for_common_languages() {
-        for f in [
-            "A.java", "a.kt", "a.kts", "a.ts", "a.tsx", "a.js", "a.py", "a.rs", "a.go", "a.c", "a.cpp", "a.cs",
-            "a.rb", "a.php", "a.swift", "a.toml", "a.yaml", "a.json", "a.sh", "a.sql", "a.html", "a.css",
-            "a.md", "a.vue", "a.scala", "a.lua", "Makefile", "Dockerfile",
-        ] {
-            assert!(syntax_for(f).is_some(), "{f}");
-        }
-        assert!(syntax_for("notes.unknownext").is_none());
-    }
-
-    #[test]
-    fn java_kotlin_typescript() {
-        let l = toks("A.java", "public class A { // hi\n  String s = \"x\"; int n = 42;\n}");
-        assert!(has(&l[0], "public", Tok::Keyword) && has(&l[0], "// hi", Tok::Comment));
-        assert!(has(&l[1], "\"x\"", Tok::String) && has(&l[1], "42", Tok::Number));
-        let l = toks("a.kt", "fun main() { val x = \"s\" }");
-        assert!(has(&l[0], "fun", Tok::Keyword) && has(&l[0], "\"s\"", Tok::String));
-        let l = toks("a.ts", "const x: number = 1; // c");
-        assert!(has(&l[0], "const", Tok::Keyword) && has(&l[0], "// c", Tok::Comment));
-    }
-
-    #[test]
-    fn multiline_state_carries_over() {
-        let l = toks("a.rs", "/* a\nstill comment */ fn f() {}");
-        assert!(has(&l[0], "/* a", Tok::Comment));
-        assert!(has(&l[1], "still comment", Tok::Comment) && has(&l[1], "fn", Tok::Keyword));
+    fn ignores_absurd_line_numbers() {
+        assert!(parse("R\t99999999999\t0-1:k\n")[1].is_empty());
     }
 }

@@ -17,6 +17,16 @@ macro_rules! trace {
     };
 }
 
+/// `trace!` for code that has no `Shared` at hand.
+#[macro_export]
+macro_rules! ztrace {
+    ($($arg:tt)*) => {
+        if cfg!(feature = "debug-log") {
+            eprintln!("ZJSB | {}", format!($($arg)*));
+        }
+    };
+}
+
 mod commit;
 mod diff;
 mod diffparse;
@@ -58,7 +68,7 @@ fn clean_cwd(p: PathBuf) -> PathBuf {
     if t.is_empty() || t.ends_with(':') { p } else { PathBuf::from(t) }
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq, Debug)]
 enum Mode {
     #[default]
     Tabs,
@@ -279,6 +289,12 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        trace!(self.shared, "update mode={:?} {}", self.mode, match &event {
+            Event::RunCommandResult(c, o, e, ctx) => format!("RunCommandResult code={c:?} stdout={}B stderr={}B ctx={ctx:?}", o.len(), e.len()),
+            Event::Key(k) => format!("Key {k:?}"),
+            Event::Mouse(m) => format!("Mouse {m:?}"),
+            e => format!("{:?}", EventType::from(e)),
+        });
         // Some terminals (and ConPTY) deliver Enter as LF / CR with Ctrl: Ctrl+J / Ctrl+M.
         // (Alt+Enter, the commit message's new line, then arrives as Alt+Ctrl+J.)
         let event = match event {
@@ -385,6 +401,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        trace!(self.shared, "render mode={:?} {rows}x{cols}", self.mode);
         match self.mode {
             Mode::Tabs => self.tabs.render(&mut self.shared, rows, cols),
             Mode::Panel => self.panel.render(&mut self.shared, rows, cols),

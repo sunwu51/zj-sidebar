@@ -2,7 +2,7 @@
 name = "zjsb-helper"
 version = "0.1.0"
 edition = "2024"
-description = "Native helper for zj-sidebar: lists Codex threads and finds running agent sessions"
+description = "Native helper for zj-sidebar: lists Codex threads, finds running agent sessions and highlights files for the diff overlay"
 license = "MIT"
 repository = "https://github.com/sunwu51/zj-sidebar"
 publish = false
@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

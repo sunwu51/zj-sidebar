@@ -86,7 +86,7 @@ pub struct Panel {
 /// Where the installers put the native helper, independent of zellij's config dir:
 /// `%LOCALAPPDATA%\zj-sidebar\zjsb-helper.exe` or `$XDG_DATA_HOME/zj-sidebar/zjsb-helper`
 /// (default `~/.local/share/zj-sidebar/zjsb-helper`).
-fn default_helper(env: &BTreeMap<String, String>) -> String {
+pub(crate) fn default_helper(env: &BTreeMap<String, String>) -> String {
     let non_empty = |k: &str| env.get(k).filter(|v| !v.is_empty());
     if env.get("OS").is_some_and(|os| os == "Windows_NT") {
         if let Some(d) = non_empty("LOCALAPPDATA") {
@@ -388,6 +388,7 @@ impl Panel {
         let config = BTreeMap::from([
             ("mode".to_string(), "diff".to_string()),
             ("diff_cwd".to_string(), cwd),
+            ("helper".to_string(), self.helper.clone()),
             ("diff_path".to_string(), f.path.clone()),
             ("diff_code".to_string(), f.code.clone()),
             // the whole list, so the overlay can move on to the next/previous file

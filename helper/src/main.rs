@@ -4,9 +4,13 @@
 //! (`{"id","title","updated_ms"}`) for the Codex threads `codex resume` would list
 //! for that directory, newest first.
 //!
+//! `zjsb-helper size|highlight ...` tells the diff overlay how big the two versions of a file
+//! are and how to color them (see `highlight.rs`).
+//!
 //! `zjsb-helper running <pid>...` prints `{"root","kind","id"}` for each Claude Code /
 //! Codex session running somewhere below the given (pane shell) processes.
 
+mod highlight;
 mod procs;
 
 use std::collections::{BTreeSet, HashMap};
@@ -184,7 +188,9 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [cmd, cwd] if cmd == "codex" => codex(cwd),
         [cmd, pids @ ..] if cmd == "running" => running(&pids.iter().filter_map(|p| p.parse().ok()).collect::<Vec<_>>()),
-        _ => Err("usage: zjsb-helper codex <cwd> | zjsb-helper running <pid>...".into()),
+        [cmd, cwd, old, new] if cmd == "size" => highlight::size(cwd, old, new),
+        [cmd, cwd, path, old, new] if cmd == "highlight" => highlight::highlight(cwd, path, old, new),
+        _ => Err("usage: zjsb-helper codex <cwd> | running <pid>... | size <cwd> <old> <new> | highlight <cwd> <path> <old> <new>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
