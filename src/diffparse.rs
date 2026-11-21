@@ -29,6 +29,16 @@ pub enum Row {
     Pair { left: Side, right: Side },
 }
 
+impl Row {
+    /// an added/removed line (or a notice such as "binary file differs")
+    pub fn changed(&self) -> bool {
+        match self {
+            Row::Meta(_) => true,
+            Row::Pair { left, right } => left.kind != Kind::Context || right.kind != Kind::Context,
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct Parsed {
     pub rows: Vec<Row>,
@@ -119,6 +129,188 @@ pub fn parse(diff: &str) -> Parsed {
     p
 }
 
+// -- folding ------------------------------------------------------------------------
+//
+// The diff is requested with (practically) unlimited context, so every line of the file is
+// in `rows`. Runs of unchanged lines far from any change are folded into a `Gap` that the
+// user can open step by step.
+
+/// Lines of context kept around every change.
+pub const CONTEXT: usize = 3;
+
+/// A run of unchanged rows, `order[start..end]`, that is folded by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gap {
+    pub start: usize,
+    pub end: usize,
+    /// something (a change) comes before / after the gap
+    pub above: bool,
+    pub below: bool,
+    /// rows revealed below the preceding change / above the following one
+    pub top: usize,
+    pub bottom: usize,
+}
+
+impl Gap {
+    pub fn hidden(&self) -> usize {
+        (self.end - self.start).saturating_sub(self.top + self.bottom)
+    }
+
+    /// Reveal `n` more rows below the change above the gap.
+    pub fn open_down(&mut self, n: usize) {
+        self.top += n.min(self.hidden());
+    }
+
+    /// Reveal `n` more rows above the change below the gap.
+    pub fn open_up(&mut self, n: usize) {
+        self.bottom += n.min(self.hidden());
+    }
+
+    pub fn open_all(&mut self) {
+        self.top = self.end - self.start;
+        self.bottom = 0;
+    }
+
+    /// Make the row at `pos` (`start <= pos < end`) visible, with `ctx` rows around it.
+    pub fn reveal(&mut self, pos: usize, ctx: usize) {
+        let len = self.end - self.start;
+        let from_top = pos - self.start + 1 + ctx;
+        let from_bottom = self.end - pos + ctx;
+        let (top, bottom) = if self.above && (!self.below || from_top <= from_bottom) {
+            (self.top.max(from_top), self.bottom)
+        } else {
+            (self.top, self.bottom.max(from_bottom))
+        };
+        if top + bottom >= len {
+            self.open_all();
+        } else {
+            self.top = top;
+            self.bottom = bottom;
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct Folds {
+    /// indexes into `Parsed::rows` of the rows that take part (hunk headers do not)
+    pub order: Vec<usize>,
+    pub gaps: Vec<Gap>,
+    /// positions in `order` where a hunk (changes plus their context) starts
+    pub starts: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    /// index into `Parsed::rows`
+    Row(usize),
+    /// index into `Folds::gaps`: the "N lines hidden" row
+    Fold(usize),
+}
+
+pub fn folds(p: &Parsed, ctx: usize) -> Folds {
+    let order: Vec<usize> = (0..p.rows.len())
+        .filter(|&i| !matches!(&p.rows[i], Row::Meta(t) if t.starts_with("@@ ")))
+        .collect();
+    let n = order.len();
+    let changed: Vec<bool> = order.iter().map(|&i| p.rows[i].changed()).collect();
+    let mut keep = vec![false; n];
+    for i in (0..n).filter(|&i| changed[i]) {
+        for k in keep.iter_mut().take((i + ctx + 1).min(n)).skip(i.saturating_sub(ctx)) {
+            *k = true;
+        }
+    }
+    let mut f = Folds { order, ..Default::default() };
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j < n && keep[j] == keep[i] {
+            j += 1;
+        }
+        if keep[i] {
+            f.starts.push(i);
+        } else {
+            f.gaps.push(Gap { start: i, end: j, above: i > 0, below: j < n, top: 0, bottom: 0 });
+        }
+        i = j;
+    }
+    f
+}
+
+/// The lines to show, and where (in them) each hunk starts.
+pub fn layout(f: &Folds) -> (Vec<Item>, Vec<usize>) {
+    let mut items = Vec::with_capacity(f.order.len());
+    let mut hunks = Vec::with_capacity(f.starts.len());
+    let mut starts = f.starts.iter().peekable();
+    let mut gaps = f.gaps.iter().enumerate().peekable();
+    let mut pos = 0;
+    while pos < f.order.len() {
+        if let Some(&(g, gap)) = gaps.peek() {
+            if gap.start == pos {
+                let rows = |a: usize, b: usize| (a..b).map(|k| Item::Row(f.order[k]));
+                items.extend(rows(gap.start, gap.start + gap.top));
+                if gap.hidden() > 0 {
+                    items.push(Item::Fold(g));
+                }
+                items.extend(rows(gap.end - gap.bottom, gap.end));
+                pos = gap.end;
+                gaps.next();
+                continue;
+            }
+        }
+        if starts.peek() == Some(&&pos) {
+            hunks.push(items.len());
+            starts.next();
+        }
+        items.push(Item::Row(f.order[pos]));
+        pos += 1;
+    }
+    (items, hunks)
+}
+
+// -- search -------------------------------------------------------------------------
+
+fn lower(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Byte ranges of the case-insensitive occurrences of `needle` in `text`.
+pub fn find_all(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let n: Vec<char> = needle.chars().map(lower).collect();
+    let mut out = Vec::new();
+    if n.is_empty() {
+        return out;
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i + n.len() <= chars.len() {
+        if chars[i..i + n.len()].iter().zip(&n).all(|(&(_, c), &m)| lower(c) == m) {
+            let end = chars.get(i + n.len()).map_or(text.len(), |c| c.0);
+            out.push((chars[i].0, end));
+            i += n.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Indexes into `rows` of the rows with `needle` on either side.
+pub fn search(p: &Parsed, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let hit = |s: &Side| !find_all(&s.text, needle).is_empty();
+    p.rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| match r {
+            Row::Meta(_) => false,
+            Row::Pair { left, right } => hit(left) || hit(right),
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +386,60 @@ index 111..222 100644
         let p = parse("@@ -1,2 +1,2 @@\n-a\n+b\n-c\n+d\n");
         let texts: Vec<_> = p.rows[1..].iter().map(|r| { let (l, r) = pair(r); (l.text.clone(), r.text.clone()) }).collect();
         assert_eq!(texts, vec![("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())]);
+    }
+
+    #[test]
+    fn folds_far_context_and_opens_step_by_step() {
+        // 20 rows, changes at rows 3 and 18 (1-based): context 3 keeps rows 1..=6 and 15..=20
+        let mut d = String::from("@@ -1,20 +1,20 @@\n");
+        for i in 1..=20 {
+            match i {
+                3 | 18 => d.push_str(&format!("-old{i}\n+new{i}\n")),
+                _ => d.push_str(&format!(" l{i}\n")),
+            }
+        }
+        let p = parse(&d);
+        let mut f = folds(&p, 3);
+        assert_eq!(f.starts, vec![0, 14]);
+        assert_eq!(f.gaps.len(), 1);
+        assert_eq!((f.gaps[0].start, f.gaps[0].end, f.gaps[0].hidden()), (6, 14, 8));
+        let (items, hunks) = layout(&f);
+        assert_eq!(items.len(), 6 + 1 + 6);
+        assert_eq!(items[6], Item::Fold(0));
+        assert_eq!(hunks, vec![0, 7]);
+        f.gaps[0].open_down(2);
+        f.gaps[0].open_up(2);
+        assert_eq!(f.gaps[0].hidden(), 4);
+        assert_eq!(layout(&f).0.len(), 6 + 2 + 1 + 2 + 6);
+        f.gaps[0].open_down(50);
+        assert_eq!(f.gaps[0].hidden(), 0);
+        assert!(!layout(&f).0.contains(&Item::Fold(0)));
+        assert_eq!(layout(&f).0.len(), 20);
+    }
+
+    #[test]
+    fn edges_fold_towards_the_change() {
+        let mut d = String::from("@@ -1,30 +1,30 @@\n");
+        for i in 1..=30 {
+            if i == 15 { d.push_str("-a\n+b\n") } else { d.push_str(&format!(" l{i}\n")) }
+        }
+        let p = parse(&d);
+        let f = folds(&p, 3);
+        assert_eq!(f.gaps.len(), 2);
+        assert!(!f.gaps[0].above && f.gaps[0].below);
+        assert!(f.gaps[1].above && !f.gaps[1].below);
+        let mut g = f.gaps[0];
+        g.reveal(9, 3);
+        assert_eq!((g.top, g.bottom), (0, 5));
+    }
+
+    #[test]
+    fn finds_text_case_insensitively() {
+        assert_eq!(find_all("Foo foo FOO", "foo"), vec![(0, 3), (4, 7), (8, 11)]);
+        assert_eq!(find_all("héllo", "LLO"), vec![(3, 6)]);
+        assert!(find_all("abc", "").is_empty());
+        let p = parse("@@ -1,2 +1,2 @@\n-hello\n+world\n tail\n");
+        assert_eq!(search(&p, "WORLD"), vec![1]);
+        assert_eq!(search(&p, "tail"), vec![2]);
     }
 }

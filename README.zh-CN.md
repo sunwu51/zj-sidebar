@@ -84,8 +84,8 @@ macOS 上 `Alt` 需要终端开启 “Option 当 Alt/Meta”（kitty：`macos_op
 | 面板 | 文件和会话是两个独立的列表，各有自己的光标、滚动和计数（文件摘要旁是 `3/18`，SESSIONS 旁是 `5/50`）：`j`/`k`/`↑`/`↓` 只在当前列表内移动，到头就停，`Tab` 切换列表，`Enter` 或再点选中行打开（文件 → diff 浮层，会话 → 恢复），`g`/`G` 第一个/最后一个，`r` 刷新，`c` 提交，`b` 分支面板，`l` Git Log 窗口，`f` fetch，`q`/`Esc` 关闭；在 shell 里按 `Alt+g` 跳进面板、再按一次跳回（见上面的快捷键） |
 | 提交对话框 | 直接输入提交信息（`Alt+Enter` 或行尾 `\` 再按 `Enter` 换行，`Enter` 提交），`Tab` 切到文件/选项列表：`↑`/`↓` 移动，`Space`（或点击）勾选文件 / amend / push，`a` 全选/全不选；`Ctrl+U` 一键清空提交信息；`Esc` 关闭并保留草稿；git 拒绝时（如 hook 失败）对话框保持打开并显示错误 |
 | 分支面板 | 直接输入过滤，`↑`/`↓` 移动，`Enter`/`→`（或点击）打开该分支的操作菜单（每项有字母快捷键，如 `c` = checkout），`Backspace` 删除过滤字符，`Esc` 清空过滤/关闭；在右侧面板里它占据面板主体区域 |
-| Git Log 窗口 | `j`/`k` 移动，`Enter`/`m` = 该提交的操作菜单（第一项 `f` 显示改动文件），`l`/`Tab`/`→` 进入文件列表，在文件上 `Enter` = diff，`m` = 文件操作，`h`/`←` 返回；`c` 提交，`b` 分支面板，`/` 过滤（提交信息、作者、hash、引用），`a` 切换全部分支/当前分支，`y` 复制 hash/路径，`f` fetch，`r` 刷新，`q`/`Esc` 逐级返回（过滤 → 文件历史 → 分支范围）直到关闭；双击提交进入其文件列表 |
-| diff 浮层 | `j`/`k` 滚动，`space`/`b` 翻页，`n`/`p` 下/上一个改动块，`]`/`[`（或 `Tab`/`Shift+Tab`）下/上一个改动文件，`h`/`l` 横向滚动，`g`/`G` 顶部/底部，`q`/`Esc` 关闭 |
+| Git Log 窗口 | `j`/`k` 移动，`Enter`/`m` = 该提交的操作菜单（第一项 `f` 显示改动文件），`l`/`Tab`/`→` 进入文件列表，在文件上 `Enter` = diff，`m` = 文件操作，`h`/`←` 返回；`c` 提交，`b` 分支面板，`/` 搜索（语法 `branch:master & author:frank & file:Foo.java & msg:'内容' & hash:ab12`，各条件同时满足；`file:` 匹配任意目录下的同名文件，`branch:` 可填分支/标签/范围；直接输入纯文本 = `msg:`；`Enter` 应用，`Esc` 清除），`a` 切换全部分支/当前分支，`y` 复制 hash/路径，`f` fetch，`r` 刷新，`q`/`Esc` 逐级返回（过滤 → 文件历史 → 分支范围）直到关闭；双击提交进入其文件列表 |
+| diff 浮层 | `j`/`k` 滚动，`space`/`b` 翻页，`n`/`p`（或 `}`/`{`）跳到下/上一处 diff——标题栏显示 `diff 2/5`，并有可点击的 `[▲ prev] [▼ next]`；默认显示整个文件，打开时定位到第一处改动，`]`/`[`（或 `Tab`/`Shift+Tab`）下/上一个改动文件，`h`/`l` 横向滚动，`g`/`G` 顶部/底部，`/` 在当前文件内搜索（左右两侧都搜；`Enter` 跳到下一个匹配，`n`/`N` 下/上一个，`Esc` 清除），`C` 把未改动的部分折叠起来（保留 3 行上下文），`u`/`d`/`a` 把下一处折叠块向上/向下展开 50 行/全部展开（也可点击 `[↑ 50]` `[↓ 50]` `[all]`），`E` 全部展开，`q`/`Esc` 关闭 |
 | `CC`/`CX` 后的 `●` | 该会话正在当前 zellij 会话的某个 pane 中运行 |
 
 ### 配置
@@ -131,7 +131,7 @@ Linux/macOS 上的 bash/zsh/fish 不需要。
 - Codex 的会话列表在 `~/.codex/state_<n>.sqlite`，wasm 插件读不了，所以用一个小型原生程序（`helper/`）列出 `codex resume` 会显示的线程（未归档、来源为 `cli`/`vscode`）。
 - “运行中”检测：helper 遍历每个 pane 的 shell 子进程。Claude 用 `~/.claude/sessions/<pid>.json`；Codex 用命令行里的 `codex resume <id>`（直接敲 `codex` 启动的识别不到）。
 - “空闲”＝ pane 的前台进程是 shell。
-- diff 浮层是同一个插件的第三种模式（`diff`），以浮动 pane 打开；它执行 `git diff HEAD -- <文件>`（未跟踪文件用 `--no-index` 对比 `/dev/null`；某个提交则是 `git diff <父提交> <提交>`），把删除/新增行对齐成左右两列。
+- diff 浮层是同一个插件的第三种模式（`diff`），以浮动 pane 打开；它执行 `git diff HEAD -U99999999 -- <文件>`（整个文件作为上下文，默认只展开每处改动前后 3 行，其余折叠）（未跟踪文件用 `--no-index` 对比 `/dev/null`；某个提交则是 `git diff <父提交> <提交>`），把删除/新增行对齐成左右两列。代码用 [syntect](https://github.com/trishume/syntect)（纯 Rust 正则引擎）和 [two-face](https://github.com/CosmicHorrorDev/two-face) 自带的语法（bat 的那套：Java、Kotlin、TypeScript/TSX、JavaScript、Python、Rust、Go、C/C++/C#、Swift、Ruby、PHP、Scala、Lua、SQL、shell、TOML/YAML/JSON、HTML/CSS/Vue、Markdown、Makefile、Dockerfile 等，按文件扩展名选择）做语法高亮，颜色用终端自己的 16 色；单侧超过 8000 行的文件不高亮。
 - Git Log 窗口是第四种模式（`log`）：对所有分支执行 `git log --date-order`，由插件自己排布提交树的泳道（每个提交一行）。Git 操作逐条执行 git 命令，并设置 `GIT_TERMINAL_PROMPT=0`、`GIT_EDITOR=true`，不会卡在等待输入上；checkout 被本地改动挡住时，提供 IDEA 的 *smart checkout*（stash → checkout → unstash）或强制 checkout；删除未合并的分支会先确认再 `-D`。交互式 rebase 在浮动终端 pane 中打开。
 
 ## 常见问题

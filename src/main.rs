@@ -24,6 +24,7 @@ mod git;
 mod gitctl;
 mod gitlog;
 mod gitwin;
+mod highlight;
 mod panel;
 mod sessions;
 mod tabs;

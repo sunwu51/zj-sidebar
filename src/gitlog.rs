@@ -94,6 +94,123 @@ pub fn classify(decorations: &[String], locals: &HashSet<String>) -> Vec<RefLabe
     out
 }
 
+// -- search query -----------------------------------------------------------------
+
+/// What the filter box of the log window means: `branch:master & author:frank &
+/// file:Foo.java & msg:'content 123' & hash:ab12`. A text without any `key:` is a `msg`.
+/// Values may be quoted ('…' or "…"); terms are joined by `&` and all must match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Query {
+    /// ref or range to walk (git decides)
+    pub branch: Option<String>,
+    /// file name or path suffix, matched under any directory (git decides)
+    pub file: Option<String>,
+    pub author: Option<String>,
+    pub msg: Option<String>,
+    pub hash: Option<String>,
+}
+
+/// Split at `&` outside quotes.
+fn terms(input: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut quote: Option<char> = None;
+    for c in input.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '&') => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        out.last_mut().unwrap().push(c);
+    }
+    out
+}
+
+fn unquote(v: &str) -> String {
+    let v = v.trim();
+    let mut cs = v.chars();
+    match (cs.next(), v.chars().last()) {
+        (Some(q @ ('\'' | '"')), Some(e)) if e == q && v.len() > 1 => v[1..v.len() - 1].to_string(),
+        // still being typed: no closing quote yet
+        (Some('\'' | '"'), _) => v[1..].to_string(),
+        _ => v.to_string(),
+    }
+}
+
+impl Query {
+    pub fn parse(input: &str) -> Query {
+        let mut q = Query::default();
+        let mut keyed = false;
+        let mut loose: Vec<String> = Vec::new();
+        for t in terms(input) {
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let hit = t.split_once(':').and_then(|(k, v)| {
+                let k = k.trim().to_ascii_lowercase();
+                let key = match k.as_str() {
+                    "branch" | "ref" => "branch",
+                    "author" => "author",
+                    "file" | "path" => "file",
+                    "msg" | "message" => "msg",
+                    "hash" | "sha" => "hash",
+                    _ => return None,
+                };
+                Some((key, unquote(v)))
+            });
+            match hit {
+                Some((key, v)) => {
+                    keyed = true;
+                    let v = Some(v).filter(|v| !v.is_empty());
+                    match key {
+                        "branch" => q.branch = v,
+                        "author" => q.author = v,
+                        "file" => q.file = v,
+                        "msg" => q.msg = v,
+                        _ => q.hash = v,
+                    }
+                }
+                None => loose.push(t.to_string()),
+            }
+        }
+        if !keyed {
+            // plain text: the whole input is a message search (an `&` in it is just text)
+            q.msg = Some(unquote(input)).filter(|m| !m.is_empty());
+        } else if !loose.is_empty() {
+            let more = loose.iter().map(|l| unquote(l)).collect::<Vec<_>>().join(" ");
+            q.msg = Some(match q.msg.take() {
+                Some(m) => format!("{m} {more}"),
+                None => more,
+            });
+        }
+        q
+    }
+
+    /// Does `c` pass the parts of the query that are checked here (git handles `branch`
+    /// and `file`)?
+    pub fn matches(&self, c: &Commit) -> bool {
+        let has = |hay: &str, needle: &str| hay.to_lowercase().contains(&needle.to_lowercase());
+        self.author.as_ref().is_none_or(|a| has(&c.author, a) || has(&c.email, a))
+            && self.msg.as_ref().is_none_or(|m| has(&c.subject, m) || has(&c.body, m))
+            && self.hash.as_ref().is_none_or(|h| c.sha.to_lowercase().starts_with(&h.to_lowercase()))
+    }
+
+    /// The part git has to resolve, as a pathspec matching the name under any directory.
+    pub fn pathspec(&self) -> Option<String> {
+        let f = self.file.as_ref()?.trim_start_matches("./").trim_start_matches('/');
+        Some(format!(":(glob,icase)**/{f}"))
+    }
+
+    /// The parts that need another `git log` when they change.
+    pub fn server(&self) -> (Option<String>, Option<String>) {
+        (self.branch.clone(), self.pathspec())
+    }
+}
+
 // -- branches -----------------------------------------------------------------------
 
 pub const BRANCH_FORMAT: &str = "--format=%(refname)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1f%(HEAD)%1f%(committerdate:unix)%1f%(contents:subject)";
@@ -497,5 +614,37 @@ mod tests {
         assert_eq!(repo_state("interactive rebase in progress; onto abc\n"), Some(OpKind::Rebase));
         assert_eq!(repo_state("You have unmerged paths.\n"), Some(OpKind::Merge));
         assert_eq!(repo_state("On branch main\nnothing to commit\n"), None);
+    }
+
+    #[test]
+    fn parses_search_queries() {
+        let q = Query::parse("branch:master & author:frank & file:Foo.java & msg:'content 123'");
+        assert_eq!(q.branch.as_deref(), Some("master"));
+        assert_eq!(q.author.as_deref(), Some("frank"));
+        assert_eq!(q.file.as_deref(), Some("Foo.java"));
+        assert_eq!(q.msg.as_deref(), Some("content 123"));
+        assert_eq!(q.pathspec().as_deref(), Some(":(glob,icase)**/Foo.java"));
+        // plain text is a message search, `&` and `:` inside it included
+        assert_eq!(Query::parse("fix a & b: c").msg.as_deref(), Some("fix a & b: c"));
+        // a quoted `&` does not split; a half-typed quote is tolerated
+        assert_eq!(Query::parse("msg:'a & b' & author:x").msg.as_deref(), Some("a & b"));
+        assert_eq!(Query::parse("msg:\"abc").msg.as_deref(), Some("abc"));
+        assert_eq!(Query::parse("author:"), Query::default());
+        assert_eq!(Query::parse("  "), Query::default());
+    }
+
+    #[test]
+    fn query_filters_commits() {
+        let mut c = c("abc123", &[]);
+        c.author = "Frank".into();
+        c.email = "f@x.io".into();
+        c.subject = "Fix the Thing".into();
+        c.body = "content 123 here".into();
+        assert!(Query::parse("author:frank & msg:'CONTENT 123'").matches(&c));
+        assert!(Query::parse("fix the").matches(&c));
+        assert!(Query::parse("hash:abc").matches(&c));
+        assert!(!Query::parse("author:bob").matches(&c));
+        assert!(!Query::parse("author:frank & msg:nope").matches(&c));
+        assert!(Query::parse("branch:main & file:a.rs").matches(&c));
     }
 }

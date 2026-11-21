@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use zellij_tile::prelude::*;
 
 use crate::gitctl::{run_git, short, Act, GitCtl, HostAct, Job, Out};
-use crate::gitlog::{self, ChangedFile, Commit, RefKind};
+use crate::gitlog::{self, ChangedFile, Commit, Query, RefKind};
 use crate::ui::{self, Line, BLUE, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, REVERSE, YELLOW};
 use crate::widgets::{plain, Item, Menu};
 use crate::Shared;
@@ -68,6 +68,10 @@ pub struct GitWin {
     /// file history: only commits touching this path
     path: Option<String>,
     filter: String,
+    /// `filter` parsed (see `gitlog::Query`)
+    query: Query,
+    /// the part of the query git resolves (branch, file pathspec) that the log was loaded with
+    server: (Option<String>, Option<String>),
     typing: bool,
     /// indexes into `commits` that pass the filter
     shown: Vec<usize>,
@@ -112,39 +116,44 @@ impl GitWin {
         self.loading = true;
         let limit = self.limit.to_string();
         let mut a: Vec<&str> = vec!["log", "--date-order", "-n", &limit, gitlog::LOG_DATE, gitlog::LOG_FORMAT];
-        match &self.scope {
-            Scope::All => a.extend(["--branches", "--remotes", "--tags", "HEAD"]),
-            Scope::Head => a.push("HEAD"),
-            Scope::Ref(r) => a.push(r),
+        match (&self.server.0, &self.scope) {
+            (Some(b), _) => a.push(b),
+            (None, Scope::All) => a.extend(["--branches", "--remotes", "--tags", "HEAD"]),
+            (None, Scope::Head) => a.push("HEAD"),
+            (None, Scope::Ref(r)) => a.push(r),
         }
-        if let Some(p) = &self.path {
-            a.extend(["--", p]);
+        if self.path.is_some() || self.server.1.is_some() {
+            a.push("--");
+            a.extend(self.path.iter().chain(&self.server.1).map(String::as_str));
         }
         let ctx = BTreeMap::from([("log".to_string(), self.generation.to_string())]);
         run_git(&self.root, &a, ctx);
     }
 
     fn refilter(&mut self) {
-        let f = self.filter.to_lowercase();
-        self.shown = if f.is_empty() {
-            (0..self.commits.len()).collect()
-        } else {
-            (0..self.commits.len())
-                .filter(|&i| {
-                    let c = &self.commits[i];
-                    c.subject.to_lowercase().contains(&f)
-                        || c.author.to_lowercase().contains(&f)
-                        || c.sha.starts_with(&f)
-                        || c.decorations.iter().any(|d| d.to_lowercase().contains(&f))
-                })
-                .collect()
-        };
+        self.query = Query::parse(&self.filter);
+        // branch and file are resolved by git (`apply_filter`); the rest is checked here
+        self.shown = (0..self.commits.len()).filter(|&i| self.query.matches(&self.commits[i])).collect();
         self.sel = self
             .sel_sha
             .as_ref()
             .and_then(|s| self.shown.iter().position(|&i| self.commits[i].sha == *s))
             .unwrap_or(0);
         self.after_move();
+    }
+
+    /// The filter was confirmed or cleared: reload if git has to answer a different
+    /// branch or file, otherwise just filter what is loaded.
+    fn apply_filter(&mut self) {
+        let server = Query::parse(&self.filter).server();
+        if server != self.server {
+            self.server = server;
+            self.limit = PAGE;
+            self.focus = Pane::Log;
+            self.reload();
+        } else {
+            self.refilter();
+        }
     }
 
     fn selected(&self) -> Option<&Commit> {
@@ -454,9 +463,12 @@ impl GitWin {
                 BareKey::Esc => {
                     self.typing = false;
                     self.filter.clear();
-                    self.refilter();
+                    self.apply_filter();
                 }
-                BareKey::Enter => self.typing = false,
+                BareKey::Enter => {
+                    self.typing = false;
+                    self.apply_filter();
+                }
                 BareKey::Backspace => {
                     self.filter.pop();
                     self.refilter();
@@ -539,7 +551,7 @@ impl GitWin {
                     self.focus = Pane::Log;
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
-                    self.refilter();
+                    self.apply_filter();
                 } else if self.path.is_some() {
                     self.path = None;
                     self.reload();
@@ -678,6 +690,7 @@ impl GitWin {
         head.push(DIM, "  │  ");
         let x0 = head.width;
         let scope = match &self.scope {
+            _ if self.server.0.is_some() => self.server.0.clone().unwrap_or_default(),
             Scope::All => "all branches".to_string(),
             Scope::Head => "current branch".to_string(),
             Scope::Ref(r) => r.clone(),
@@ -691,12 +704,12 @@ impl GitWin {
         let x0 = head.width;
         if self.typing || !self.filter.is_empty() {
             head.push(DIM, "⌕ ");
-            head.push(BOLD, &ui::truncate(&self.filter, 24));
+            head.push(BOLD, &ui::truncate_left(&self.filter, 40));
             if self.typing {
                 head.push(REVERSE, " ");
             }
         } else {
-            head.push(DIM, "⌕ filter (/)");
+            head.push(DIM, "⌕ search (/)");
         }
         self.zones.push((0, x0, head.width, Zone::Filter));
         if let Some(op) = self.ctl.state {
@@ -763,12 +776,15 @@ impl GitWin {
         // -- footer ---------------------------------------------------------------
         let mut foot = Line::new();
         match &self.ctl.status {
+            _ if self.typing => {
+                foot.push(DIM, &ui::truncate(" branch:x & author:x & file:Name.java & msg:'text' & hash:abc    plain text = msg    Enter apply  Esc clear", w));
+            }
             Some((msg, err)) => {
                 foot.push(if *err { RED } else { GREEN }, &format!(" {}", ui::truncate(msg, w.saturating_sub(2))));
             }
             None => {
                 let hint = match self.focus {
-                    Pane::Log => " j/k move  Enter/m actions  l/Tab files  c commit  b branches  / filter  a scope  y copy hash  f fetch  r reload  q close",
+                    Pane::Log => " j/k move  Enter/m actions  l/Tab files  c commit  b branches  / search  a scope  y copy hash  f fetch  r reload  q close",
                     Pane::Files => " j/k move  Enter diff  m actions  h/← back  y copy path  q back",
                 };
                 foot.push(DIM, &ui::truncate(hint, w));
