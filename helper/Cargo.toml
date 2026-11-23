@@ -1,6 +1,6 @@
 [package]
 name = "zjsb-helper"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Native helper for zj-sidebar: lists Codex threads, finds running agent sessions and highlights files for the diff overlay"
 license = "MIT"
