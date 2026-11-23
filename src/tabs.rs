@@ -84,6 +84,8 @@ pub struct TabsView {
     focus_requested: Option<PaneId>,
     /// Git Log window requested from a pipe: (plugin url, directory)
     log_requested: Option<(String, String)>,
+    /// recent-sessions window requested from a pipe: the plugin url
+    recent_requested: Option<String>,
     last_focus_pipe: u128,
 }
 
@@ -219,6 +221,9 @@ impl TabsView {
                 self.place_panel(shared);
                 if let Some((url, cwd)) = self.log_requested.take() {
                     Self::launch_git_log(url, cwd);
+                }
+                if let Some(url) = self.recent_requested.take() {
+                    Self::launch_recent(shared, url);
                 }
                 if *elapsed < REFRESH_SECS / 2.0 {
                     return false; // the one-shot open timer, not the refresh loop
@@ -368,6 +373,45 @@ impl TabsView {
         let Some(cwd) = term.and_then(|t| shared.cwd_now(t)) else { return };
         self.log_requested = Some((url, cwd.to_string_lossy().into_owned()));
         set_timeout(OPEN_DELAY_SECS);
+    }
+
+    /// `recent_sessions` pipe: the newest agent sessions of any directory, in a floating window.
+    pub fn open_recent(&mut self, shared: &mut Shared) {
+        if !Self::in_focused_tab(shared) {
+            return;
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.last_focus_pipe) < 300 {
+            return;
+        }
+        self.last_focus_pipe = now;
+        let Some(url) = shared.my_pane().and_then(|p| p.plugin_url.clone()) else { return };
+        self.recent_requested = Some(url);
+        set_timeout(OPEN_DELAY_SECS);
+    }
+
+    fn launch_recent(shared: &Shared, url: String) {
+        let mut config = BTreeMap::from([
+            ("mode".to_string(), "recent".to_string()),
+            ("plugin_url".to_string(), url.clone()),
+            ("n".to_string(), format!("recent{}", now_ms())),
+        ]);
+        // the same commands and helper as the panel uses
+        for k in ["helper", "claude_cmd", "codex_cmd", "shell"] {
+            if let Some(v) = shared.cfg(k) {
+                config.insert(k.to_string(), v.to_string());
+            }
+        }
+        let mut msg = MessageToPlugin::new("open")
+            .with_plugin_url(url)
+            .with_plugin_config(config)
+            .new_plugin_instance_should_float(true)
+            .new_plugin_instance_should_have_pane_title("Recent Sessions")
+            .new_plugin_instance_should_be_focused();
+        if let Some(c) = FloatingPaneCoordinates::new(Some("10%".into()), Some("8%".into()), Some("80%".into()), Some("80%".into()), None, None) {
+            msg = msg.with_floating_pane_coordinates(c);
+        }
+        pipe_message_to_plugin(msg);
     }
 
     fn launch_git_log(url: String, cwd: String) {

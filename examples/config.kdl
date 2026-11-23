@@ -32,6 +32,13 @@ keybinds {
             }
         }
 
+        // Floating list of the newest Claude Code / Codex sessions of any directory.
+        bind "Alt k" {
+            MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" {
+                name "recent_sessions"
+            }
+        }
+
         // Show/hide a floating scratch shell (zellij built-in; the default is Alt+f).
         bind "Alt j" { ToggleFloatingPanes; }
     }

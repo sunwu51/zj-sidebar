@@ -7,11 +7,15 @@
 //! `zjsb-helper size|highlight ...` tells the diff overlay how big the two versions of a file
 //! are and how to color them (see `highlight.rs`).
 //!
+//! `zjsb-helper recent <n>` prints the `n` newest Claude Code and Codex sessions of any
+//! directory (`{"kind","id","title","cwd","updated_ms"}`), newest first.
+//!
 //! `zjsb-helper running <pid>...` prints `{"root","kind","id"}` for each Claude Code /
 //! Codex session running somewhere below the given (pane shell) processes.
 
 mod highlight;
 mod procs;
+mod recent;
 
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -66,7 +70,16 @@ fn first_line(s: &str) -> &str {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 
-fn codex(cwd: &str) -> Result<(), String> {
+/// A Codex thread as `codex resume` would list it.
+pub struct Thread {
+    pub id: String,
+    pub cwd: String,
+    pub title: String,
+    pub updated_ms: i64,
+}
+
+/// The interactive threads (newest first), of one directory or of all of them.
+pub fn codex_threads(cwd: Option<&str>) -> Result<Vec<Thread>, String> {
     let home = codex_home().ok_or("no home directory")?;
     let db = state_db(&home).ok_or("no codex state database")?;
     let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
@@ -81,7 +94,7 @@ fn codex(cwd: &str) -> Result<(), String> {
              ORDER BY 7 DESC",
         )
         .map_err(|e| e.to_string())?;
-    let want = norm(cwd);
+    let want = cwd.map(norm);
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -95,22 +108,31 @@ fn codex(cwd: &str) -> Result<(), String> {
             ))
         })
         .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
     for row in rows.flatten() {
         let (id, thread_cwd, source, name, title, first_msg, updated_ms) = row;
-        if !INTERACTIVE_SOURCES.contains(&source.as_str()) || norm(&thread_cwd) != want {
+        if !INTERACTIVE_SOURCES.contains(&source.as_str()) || want.as_ref().is_some_and(|w| norm(&thread_cwd) != *w) {
             continue;
         }
         let title = [&name, &title, &first_msg]
             .into_iter()
             .map(|s| first_line(s))
             .find(|s| !s.is_empty())
-            .unwrap_or("(untitled)");
-        println!("{}", json!({ "id": id, "title": title, "updated_ms": updated_ms }));
+            .unwrap_or("(untitled)")
+            .to_string();
+        out.push(Thread { id, cwd: thread_cwd, title, updated_ms });
+    }
+    Ok(out)
+}
+
+fn codex(cwd: &str) -> Result<(), String> {
+    for t in codex_threads(Some(cwd))? {
+        println!("{}", json!({ "id": t.id, "title": t.title, "updated_ms": t.updated_ms }));
     }
     Ok(())
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")).map(PathBuf::from)
 }
 
@@ -187,10 +209,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.as_slice() {
         [cmd, cwd] if cmd == "codex" => codex(cwd),
+        [cmd, n] if cmd == "recent" => recent::recent(n.parse().unwrap_or(50)),
         [cmd, pids @ ..] if cmd == "running" => running(&pids.iter().filter_map(|p| p.parse().ok()).collect::<Vec<_>>()),
         [cmd, cwd, old, new] if cmd == "size" => highlight::size(cwd, old, new),
         [cmd, cwd, path, old, new] if cmd == "highlight" => highlight::highlight(cwd, path, old, new),
-        _ => Err("usage: zjsb-helper codex <cwd> | running <pid>... | size <cwd> <old> <new> | highlight <cwd> <path> <old> <new>".into()),
+        _ => Err("usage: zjsb-helper codex <cwd> | recent <n> | running <pid>... | size <cwd> <old> <new> | highlight <cwd> <path> <old> <new>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

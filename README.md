@@ -83,9 +83,10 @@ Click `≡ git · sessions` at the bottom of the left sidebar, or bind a key (th
 bind "Alt d" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
 bind "Alt g" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "focus_panel"; }; }
 bind "Alt Shift g" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "git_log"; }; }
+bind "Alt k" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "recent_sessions"; }; }
 ```
 
-`toggle_panel` opens/closes the panel; `focus_panel` moves the keyboard from the shell into the panel (opening it if needed) and, pressed again, back to the shell, with the panel left open; `git_log` opens the Git Log window for the focused shell's repository.
+`toggle_panel` opens/closes the panel; `focus_panel` moves the keyboard from the shell into the panel (opening it if needed) and, pressed again, back to the shell, with the panel left open; `git_log` opens the Git Log window for the focused shell's repository. `recent_sessions` opens a floating list of the newest Claude Code and Codex sessions of **any** directory (`CX dir title`, newest first; `Enter`/click jumps to the pane already running it, else resumes it in a new tab in its directory; `/` filters).
 
 On macOS, `Alt` needs "Option as Alt/Meta" in your terminal (kitty: `macos_option_as_alt yes`, iTerm2: Profiles → Keys → Left Option = Esc+, Terminal.app: Use Option as Meta key, Alacritty: `option_as_alt = "Both"`).
 

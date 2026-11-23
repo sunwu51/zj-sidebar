@@ -36,6 +36,7 @@ mod gitlog;
 mod gitwin;
 mod highlight;
 mod panel;
+mod recent;
 mod sessions;
 mod tabs;
 mod ui;
@@ -51,6 +52,8 @@ pub const TOGGLE_PIPE: &str = "toggle_panel";
 pub const FOCUS_PIPE: &str = "focus_panel";
 /// open the Git Log window for the focused shell's directory
 pub const LOG_PIPE: &str = "git_log";
+/// open the window of the newest agent sessions of any directory
+pub const RECENT_PIPE: &str = "recent_sessions";
 
 const CWD_RETRY_MS: u128 = 30_000;
 
@@ -75,6 +78,7 @@ enum Mode {
     Panel,
     Diff,
     Log,
+    Recent,
 }
 
 /// Session-wide facts both modes need.
@@ -204,6 +208,7 @@ struct State {
     panel: panel::Panel,
     diff: diff::DiffView,
     log: gitwin::GitWin,
+    recent: recent::RecentWin,
 }
 
 impl State {
@@ -213,6 +218,7 @@ impl State {
             Mode::Panel => self.panel.update(&mut self.shared, event),
             Mode::Diff => self.diff.update(&mut self.shared, event),
             Mode::Log => self.log.update(&mut self.shared, event),
+            Mode::Recent => self.recent.update(&mut self.shared, event),
         }
     }
 }
@@ -225,6 +231,7 @@ impl ZellijPlugin for State {
             Some("panel") => Mode::Panel,
             Some("diff") => Mode::Diff,
             Some("log") => Mode::Log,
+            Some("recent") => Mode::Recent,
             _ => Mode::Tabs,
         };
         self.shared.config = configuration;
@@ -274,6 +281,17 @@ impl ZellijPlugin for State {
                 EventType::RunCommandResult,
             ];
             self.diff.load(&self.shared);
+        }
+        if self.mode == Mode::Recent {
+            events = vec![
+                EventType::PermissionRequestResult,
+                EventType::TabUpdate,
+                EventType::PaneUpdate,
+                EventType::Key,
+                EventType::Mouse,
+                EventType::RunCommandResult,
+            ];
+            self.recent.load(&self.shared);
         }
         if self.mode == Mode::Log {
             events = vec![
@@ -366,7 +384,7 @@ impl ZellijPlugin for State {
         if self.mode != Mode::Tabs {
             return false;
         }
-        let action = [TOGGLE_PIPE, FOCUS_PIPE, LOG_PIPE].contains(&msg.name.as_str());
+        let action = [TOGGLE_PIPE, FOCUS_PIPE, LOG_PIPE, RECENT_PIPE].contains(&msg.name.as_str());
         if action {
             let tab = self.shared.my_tab();
             let others = tab.and_then(|p| self.shared.tab_at(p)).map(|t| t.other_focused_clients.clone());
@@ -393,6 +411,10 @@ impl ZellijPlugin for State {
             self.tabs.open_git_log(&mut self.shared);
             return false;
         }
+        if msg.name == RECENT_PIPE {
+            self.tabs.open_recent(&mut self.shared);
+            return false;
+        }
         let from = match msg.source {
             PipeSource::Plugin(id) => Some(id),
             _ => None,
@@ -407,6 +429,7 @@ impl ZellijPlugin for State {
             Mode::Panel => self.panel.render(&mut self.shared, rows, cols),
             Mode::Diff => self.diff.render(&mut self.shared, rows, cols),
             Mode::Log => self.log.render(&mut self.shared, rows, cols),
+            Mode::Recent => self.recent.render(&mut self.shared, rows, cols),
         }
     }
 }

@@ -122,8 +122,9 @@ impl GitWin {
             (None, Scope::Head) => a.push("HEAD"),
             (None, Scope::Ref(r)) => a.push(r),
         }
-        if self.path.is_some() || self.server.1.is_some() {
-            a.push("--");
+        // `--` always: a ref that is also a file name is not ambiguous
+        a.push("--");
+        {
             a.extend(self.path.iter().chain(&self.server.1).map(String::as_str));
         }
         let ctx = BTreeMap::from([("log".to_string(), self.generation.to_string())]);
@@ -151,6 +152,23 @@ impl GitWin {
             self.limit = PAGE;
             self.focus = Pane::Log;
             self.reload();
+        } else {
+            self.refilter();
+        }
+    }
+
+    /// While typing: the branch term takes effect as soon as it names a known branch (or
+    /// is removed), instead of only on Enter; everything else filters what is loaded.
+    fn live_filter(&mut self) {
+        let q = Query::parse(&self.filter);
+        let known = |b: &str| b == "HEAD" || self.ctl.branches.iter().any(|x| x.name == b);
+        let branch_changed = match (&q.branch, &self.server.0) {
+            (Some(b), s) => s.as_ref() != Some(b) && known(b),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if branch_changed {
+            self.apply_filter();
         } else {
             self.refilter();
         }
@@ -285,6 +303,7 @@ impl GitWin {
     fn host(&mut self, h: HostAct) {
         match h {
             HostAct::ShowLog(r) => self.set_scope(Scope::Ref(r)),
+            HostAct::ShowHead => self.set_scope(Scope::Head),
             HostAct::OpenLog(r) => self.set_scope(r.map(Scope::Ref).unwrap_or(Scope::All)),
             HostAct::FocusFiles => {
                 if !self.sel_files().is_empty() {
@@ -304,6 +323,12 @@ impl GitWin {
     }
 
     fn set_scope(&mut self, s: Scope) {
+        // an explicit choice replaces a `branch:` term typed into the search
+        if self.query.branch.is_some() || self.server.0.is_some() {
+            self.filter = gitlog::strip_branch(&self.filter);
+            self.server.0 = None;
+            self.query = Query::parse(&self.filter);
+        }
         self.scope = s;
         self.focus = Pane::Log;
         self.limit = PAGE;
@@ -471,13 +496,13 @@ impl GitWin {
                 }
                 BareKey::Backspace => {
                     self.filter.pop();
-                    self.refilter();
+                    self.live_filter();
                 }
                 BareKey::Down => self.move_sel(1),
                 BareKey::Up => self.move_sel(-1),
                 BareKey::Char(c) if plain(key) => {
                     self.filter.push(c);
-                    self.refilter();
+                    self.live_filter();
                 }
                 _ => {}
             }
@@ -534,10 +559,7 @@ impl GitWin {
                 self.typing = true;
                 self.focus = Pane::Log;
             }
-            BareKey::Char('a') => {
-                let next = if self.scope == Scope::All { Scope::Head } else { Scope::All };
-                self.set_scope(next);
-            }
+            BareKey::Char('a') => self.ctl.open_scope_picker(),
             BareKey::Char('r') | BareKey::F(5) => {
                 self.files.clear();
                 self.ctl.refresh();
@@ -614,11 +636,7 @@ impl GitWin {
                         }
                     }
                     Zone::Branch => self.ctl.open_picker(),
-                    Zone::Scope => {
-                        let next = if self.scope == Scope::All { Scope::Head } else { Scope::All };
-                        self.path = None;
-                        self.set_scope(next);
-                    }
+                    Zone::Scope => self.ctl.open_scope_picker(),
                     Zone::Filter => {
                         self.typing = true;
                         self.focus = Pane::Log;
@@ -784,7 +802,7 @@ impl GitWin {
             }
             None => {
                 let hint = match self.focus {
-                    Pane::Log => " j/k move  Enter/m actions  l/Tab files  c commit  b branches  / search  a scope  y copy hash  f fetch  r reload  q close",
+                    Pane::Log => " j/k move  Enter/m actions  l/Tab files  c commit  b branches  / search  a branch  y copy hash  f fetch  r reload  q close",
                     Pane::Files => " j/k move  Enter diff  m actions  h/← back  y copy path  q back",
                 };
                 foot.push(DIM, &ui::truncate(hint, w));

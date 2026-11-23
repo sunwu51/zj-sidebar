@@ -83,6 +83,8 @@ pub enum HostAct {
     OpenLog(Option<String>),
     /// in the log window: show only this ref / range
     ShowLog(String),
+    /// in the log window: only the checked-out branch
+    ShowHead,
     /// log window: move into the selected commit's files
     FocusFiles,
     /// log window file actions, by index into the selected commit's files
@@ -158,6 +160,8 @@ pub enum Out {
 #[derive(Default)]
 pub struct Picker {
     pub filter: String,
+    /// choosing what the log shows: a pick selects the branch instead of opening its menu
+    scope: bool,
     sel: usize,
     scroll: usize,
     /// screen rows of the last render -> index into `rows()`
@@ -574,6 +578,13 @@ impl GitCtl {
         self.fetch_in_background(false);
     }
 
+    /// The log window's scope dropdown: all branches, the current one, or any branch.
+    pub fn open_scope_picker(&mut self) {
+        self.picker = Some(Picker { scope: true, ..Default::default() });
+        self.menus.clear();
+        self.refresh();
+    }
+
     pub fn close_all(&mut self) {
         self.picker = None;
         self.menus.clear();
@@ -947,7 +958,13 @@ impl GitCtl {
     fn picker_rows(&self) -> Vec<PRow> {
         let filter = self.picker.as_ref().map(|p| p.filter.to_lowercase()).unwrap_or_default();
         let mut rows = Vec::new();
-        if filter.is_empty() {
+        let scope = self.picker.as_ref().is_some_and(|p| p.scope);
+        if scope {
+            if filter.is_empty() {
+                rows.push(PRow::Act(Act::Host(HostAct::OpenLog(None)), "All branches".into(), "☰"));
+                rows.push(PRow::Act(Act::Host(HostAct::ShowHead), "Current branch".into(), "●"));
+            }
+        } else if filter.is_empty() {
             if let Some(op) = self.state {
                 rows.push(PRow::Act(Act::Continue(op), format!("Continue {}", op.name()), "▶"));
                 rows.push(PRow::Act(Act::Abort(op), format!("Abort {}", op.name()), "■"));
@@ -1017,6 +1034,10 @@ impl GitCtl {
             PRow::Act(a, _, _) => self.perform(a),
             PRow::Branch(b) => {
                 let name = self.branches[b].name.clone();
+                if self.picker.as_ref().is_some_and(|p| p.scope) {
+                    self.close_all();
+                    return Some(HostAct::ShowLog(name));
+                }
                 self.branch_menu(&name);
                 None
             }
@@ -1280,8 +1301,9 @@ impl GitCtl {
             body.push(Line::new());
         }
         let out = if framed {
-            let title = format!("Branches · {}", self.current_name());
-            let hint = "↑↓ move · Enter actions · Esc close";
+            let scope = self.picker.as_ref().is_some_and(|p| p.scope);
+            let title = if scope { "Show in log".to_string() } else { format!("Branches · {}", self.current_name()) };
+            let hint = if scope { "↑↓ move · Enter show · Esc close" } else { "↑↓ move · Enter actions · Esc close" };
             ui::boxed(&title, hint, &body, w, CYAN)
         } else {
             body.into_iter().map(|l| l.fit(iw)).collect()

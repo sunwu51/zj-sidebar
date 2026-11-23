@@ -140,6 +140,20 @@ fn unquote(v: &str) -> String {
     }
 }
 
+/// `input` without its `branch:` / `ref:` terms (the scope picker replaces them).
+pub fn strip_branch(input: &str) -> String {
+    let keep: Vec<String> = terms(input)
+        .into_iter()
+        .filter(|t| {
+            let k = t.split_once(':').map(|(k, _)| k.trim().to_ascii_lowercase());
+            !matches!(k.as_deref(), Some("branch" | "ref"))
+        })
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    keep.join(" & ")
+}
+
 impl Query {
     pub fn parse(input: &str) -> Query {
         let mut q = Query::default();

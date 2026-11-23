@@ -82,9 +82,10 @@ default_layout "sidebar"
 bind "Alt d" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "toggle_panel"; }; }
 bind "Alt g" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "focus_panel"; }; }
 bind "Alt Shift g" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "git_log"; }; }
+bind "Alt k" { MessagePlugin "file:~/.config/zellij/plugins/zj-sidebar.wasm" { name "recent_sessions"; }; }
 ```
 
-`toggle_panel` 打开/关闭面板；`focus_panel` 把键盘焦点从 shell 移到面板（面板没开就先打开），再按一次回到 shell，面板保持打开；`git_log` 直接为当前 shell 所在仓库打开 Git Log 窗口。
+`toggle_panel` 打开/关闭面板；`focus_panel` 把键盘焦点从 shell 移到面板（面板没开就先打开），再按一次回到 shell，面板保持打开；`git_log` 直接为当前 shell 所在仓库打开 Git Log 窗口。 `recent_sessions` 打开一个浮动窗口，按时间列出**所有目录**最近的 Claude Code / Codex 会话（`CX 目录名 会话名`；`Enter`/点击：已在某个 pane 运行就跳过去，否则在新 tab 里于其目录恢复；`/` 过滤）。
 
 macOS 上 `Alt` 需要终端开启 “Option 当 Alt/Meta”（kitty：`macos_option_as_alt yes`；iTerm2：Profiles → Keys → Left Option = Esc+；Terminal.app：Use Option as Meta key；Alacritty：`option_as_alt = "Both"`）。
 

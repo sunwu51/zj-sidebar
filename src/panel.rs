@@ -398,7 +398,7 @@ impl Panel {
                 self.files.iter().map(|x| format!("{}\t{}", x.code, x.path)).collect::<Vec<_>>().join("\n"),
             ),
             // unique per request, so every Enter opens a fresh overlay
-            ("n".to_string(), self.tick.to_string()),
+            ("n".to_string(), format!("d{}-{}", crate::now_ms(), shared.my_id)),
         ]);
         let mut msg = MessageToPlugin::new("open")
             .with_plugin_url(url)
@@ -431,7 +431,7 @@ impl Panel {
             ("mode".to_string(), "log".to_string()),
             ("log_cwd".to_string(), cwd),
             ("plugin_url".to_string(), url.clone()),
-            ("n".to_string(), format!("log{}", self.tick)),
+            ("n".to_string(), format!("log{}-{}", crate::now_ms(), shared.my_id)),
         ]);
         if let Some(r) = range {
             config.insert("log_range".into(), r);
